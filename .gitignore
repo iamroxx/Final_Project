@@ -1,0 +1,22 @@
+# Node / Expo
+node_modules/
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/*.pyc
+
+# Env
+.env
+**/.env
+.firebaserc
+backend/firebase-service-account.json
+backend/*service-account*.json
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/

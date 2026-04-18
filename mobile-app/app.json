@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Step Motion",
+    "slug": "step-motion",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "plugins": [],
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMotionUsageDescription": "This app reads motion sensors to detect steps and movement."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACTIVITY_RECOGNITION"
+      ]
+    }
+  }
+}

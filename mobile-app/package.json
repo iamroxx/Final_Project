@@ -1,0 +1,29 @@
+{
+  "name": "step-motion-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "^1.23.1",
+    "axios": "^1.7.9",
+    "expo": "~53.0.0",
+    "expo-sensors": "~14.0.0",
+    "firebase": "^11.1.0",
+    "nativewind": "^4.1.23",
+    "react": "19.0.0",
+    "react-native": "0.79.0",
+    "react-native-safe-area-context": "^5.3.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.0.10",
+    "tailwindcss": "^3.4.16",
+    "typescript": "^5.7.2"
+  }
+}

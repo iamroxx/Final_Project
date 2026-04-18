@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ingest-batch.schema.json",
+  "title": "IngestBatch",
+  "type": "object",
+  "required": [
+    "sessionId",
+    "samplingRateHz",
+    "samples"
+  ],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "samplingRateHz": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "timestamp",
+          "ax",
+          "ay",
+          "az",
+          "gx",
+          "gy",
+          "gz",
+          "magnitude"
+        ],
+        "properties": {
+          "timestamp": {
+            "type": "integer"
+          },
+          "ax": {
+            "type": "number"
+          },
+          "ay": {
+            "type": "number"
+          },
+          "az": {
+            "type": "number"
+          },
+          "gx": {
+            "type": "number"
+          },
+          "gy": {
+            "type": "number"
+          },
+          "gz": {
+            "type": "number"
+          },
+          "magnitude": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

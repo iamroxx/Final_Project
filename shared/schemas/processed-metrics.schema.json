@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "processed-metrics.schema.json",
+  "title": "ProcessedMetrics",
+  "type": "object",
+  "required": [
+    "sessionId",
+    "timestamp",
+    "stepCountTotal",
+    "cadenceSpm",
+    "avgStepIntervalMs",
+    "intensity",
+    "activityState",
+    "sampleCount",
+    "samplingRateHz"
+  ],
+  "properties": {
+    "sessionId": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "integer"
+    },
+    "stepCountTotal": {
+      "type": "integer"
+    },
+    "cadenceSpm": {
+      "type": "number"
+    },
+    "avgStepIntervalMs": {
+      "type": "number"
+    },
+    "intensity": {
+      "type": "number"
+    },
+    "activityState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "walking",
+        "running"
+      ]
+    },
+    "sampleCount": {
+      "type": "integer"
+    },
+    "samplingRateHz": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": false
+}
