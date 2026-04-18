@@ -25,7 +25,9 @@
       "type": "integer"
     },
     "cadenceSpm": {
-      "type": "number"
+      "type": "number",
+      "minimum": 0,
+      "maximum": 200
     },
     "avgStepIntervalMs": {
       "type": "number"
