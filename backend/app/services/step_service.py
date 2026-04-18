@@ -57,6 +57,7 @@ def process_sensor_batch(
         else 0.0
     )
     cadence_spm = 60000.0 / avg_interval if avg_interval > 0 else 0.0
+    cadence_spm = min(cadence_spm, 200.0)
 
     # ── Intensity from IMU (still useful for activity classification) ──────────
     intensity = movement_intensity(filtered)
