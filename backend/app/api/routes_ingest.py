@@ -15,6 +15,12 @@ def ingest_sensor_batch():
     session_id = payload.get("sessionId")
     sampling_rate_hz = int(payload.get("samplingRateHz", 50))
     samples = payload.get("samples", [])
+    gps_speed_ms = payload.get("gpsSpeedMs")
+    if gps_speed_ms is not None:
+        gps_speed_ms = float(gps_speed_ms)
+    hw_step_count = payload.get("hwStepCount")
+    if hw_step_count is not None:
+        hw_step_count = int(hw_step_count)
 
     if not session_id:
         return jsonify({"error": "sessionId is required"}), 400
@@ -30,6 +36,8 @@ def ingest_sensor_batch():
         session_state=session_state,
         samples=samples,
         sampling_rate_hz=sampling_rate_hz,
+        gps_speed_ms=gps_speed_ms,
+        hw_step_count=hw_step_count,
     )
 
     write_live_metrics(session_id=session_id, metrics=metrics)

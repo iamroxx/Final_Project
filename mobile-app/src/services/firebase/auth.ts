@@ -18,6 +18,16 @@ export async function ensureAnonymousUser() {
   if (firebaseAuth.currentUser) {
     return firebaseAuth.currentUser;
   }
-  const credential = await signInAnonymously(firebaseAuth);
-  return credential.user;
+  try {
+    const credential = await signInAnonymously(firebaseAuth);
+    return credential.user;
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    if (code === "auth/admin-restricted-operation") {
+      throw new Error(
+        "Anonymous sign-in is disabled in Firebase Auth. Enable it in Firebase Console > Authentication > Sign-in method > Anonymous."
+      );
+    }
+    throw error;
+  }
 }

@@ -4,7 +4,6 @@
     "slug": "step-motion",
     "version": "1.0.0",
     "orientation": "portrait",
-    "plugins": [],
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
@@ -13,9 +12,27 @@
       }
     },
     "android": {
+      "package": "com.imu.stepmotion",
       "permissions": [
-        "ACTIVITY_RECOGNITION"
+        "ACTIVITY_RECOGNITION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Step Motion to use your location to confirm walking activity."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "cae54839-efe3-40c3-aeee-7b2921d6b995"
+      }
     }
   }
 }

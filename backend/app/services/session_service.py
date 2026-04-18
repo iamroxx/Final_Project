@@ -18,6 +18,7 @@ def create_session(user_id: str) -> dict:
         "stepCountTotal": 0,
         "lastStepTimestamp": None,
         "recentIntervalsMs": [],
+        "hwStepCountLast": 0,
     }
 
     return {"sessionId": session_id, "startedAt": started_at}

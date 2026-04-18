@@ -1,0 +1,7 @@
+The following packages should be updated for best compatibility with the installed expo version:
+  @react-native-async-storage/async-storage@1.24.0 - expected version: 2.1.2
+  expo-sensors@14.0.2 - expected version: ~14.1.4
+  react-native@0.79.0 - expected version: 0.79.6
+  react-native-safe-area-context@5.7.0 - expected version: 5.4.0
+  typescript@5.9.3 - expected version: ~5.8.3
+Your project may not work correctly until you install the expected versions of the packages.

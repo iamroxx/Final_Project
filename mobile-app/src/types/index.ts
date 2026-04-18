@@ -19,6 +19,10 @@ export type IngestRequest = {
   sessionId: string;
   samplingRateHz: number;
   samples: SensorSample[];
+  /** GPS ground speed in m/s from expo-location; undefined if permission denied or unavailable */
+  gpsSpeedMs?: number;
+  /** Cumulative step count from hardware pedometer chip since session started */
+  hwStepCount?: number;
 };
 
 export type ProcessedMetrics = {
