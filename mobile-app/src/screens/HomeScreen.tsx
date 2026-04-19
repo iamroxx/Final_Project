@@ -2,14 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Animated, Easing, Linking, Modal, PermissionsAndroid, Platform, Pressable, ScrollView, Text, ToastAndroid, View } from "react-native";
 import { Accelerometer, Gyroscope, Pedometer } from "expo-sensors";
 import * as Location from "expo-location";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MetricCard } from "../components/MetricCard";
 import { useSensorStream } from "../services/sensors/useSensorStream";
+import { useAppStore } from "../store/useAppStore";
 import { useSessionStore } from "../store/useSessionStore";
+import type { SessionMetricPoint } from "../types";
 
-const STEP_GOAL = 4000;
+const DEFAULT_STEP_GOAL = 100;
+const DEFAULT_CADENCE_TARGET_SPM = 70;
 const TREND_POINTS = 30;
 const STEP_LENGTH_M = 0.78;
+const SESSION_METRIC_BUCKET_MS = 3000;
 
 type TrendPoint = {
   cadence: number;
@@ -88,17 +91,23 @@ type MiniChartProps = {
   label: string;
   values: number[];
   colorClassName: string;
+  fixedMaxValue: number;
+  yAxisRangeLabel: string;
 };
 
-function MiniChart({ label, values, colorClassName }: MiniChartProps) {
-  const maxValue = Math.max(...values, 1);
+function MiniChart({ label, values, colorClassName, fixedMaxValue, yAxisRangeLabel }: MiniChartProps) {
+  const safeMaxValue = Math.max(fixedMaxValue, 1);
 
   return (
     <View className="rounded-2xl bg-slate-800 p-3">
-      <Text className="mb-2 text-xs uppercase tracking-wide text-slate-300">{label}</Text>
-      <View className="h-16 flex-row items-end gap-[2px]">
+      <View className="mb-2 flex-row items-center justify-between">
+        <Text className="text-xs uppercase tracking-wide text-slate-300">{label}</Text>
+        <Text className="text-[10px] text-slate-400">Y: {yAxisRangeLabel}</Text>
+      </View>
+      <View className="h-24 flex-row items-end gap-[2px]">
         {values.map((value, index) => {
-          const normalizedHeight = Math.max((value / maxValue) * 100, 6);
+          const clampedValue = Math.max(0, Math.min(value, safeMaxValue));
+          const normalizedHeight = Math.max((clampedValue / safeMaxValue) * 100, 4);
           return (
             <View
               key={`${label}-${index}`}
@@ -113,7 +122,6 @@ function MiniChart({ label, values, colorClassName }: MiniChartProps) {
 }
 
 export function HomeScreen() {
-  const insets = useSafeAreaInsets();
   const [startError, setStartError] = useState<string | null>(null);
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [awaitingStartConfirmation, setAwaitingStartConfirmation] = useState(false);
@@ -128,6 +136,7 @@ export function HomeScreen() {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
+  const [sessionTrendPoints, setSessionTrendPoints] = useState<SessionMetricPoint[]>([]);
   const [permissionState, setPermissionState] = useState<PermissionState>({
     pedometer: false,
     accelerometer: false,
@@ -135,6 +144,11 @@ export function HomeScreen() {
     location: false,
   });
   const [checkingPermissions, setCheckingPermissions] = useState(true);
+  const currentUser = useAppStore((state) => state.currentUser);
+  const goalSteps = useAppStore((state) => state.goalSteps);
+  const cadenceTargets = useAppStore((state) => state.cadenceTargets);
+  const progressEntries = useAppStore((state) => state.progressEntries);
+  const recordProgress = useAppStore((state) => state.recordProgress);
   const {
     isRunning,
     sessionId,
@@ -154,6 +168,7 @@ export function HomeScreen() {
   const signedAccumRef = useRef<AxisVector>({ x: 0, y: 0, z: 0 });
   // Timestamp of the first sample after calibration begins.
   const calibrationStartRef = useRef(0);
+  const lastRecordedBucketRef = useRef<number>(-1);
   const glowOpacity = useRef(new Animated.Value(0)).current;
 
   const calibrationDisplayAxis = calibrationForwardAxis ?? calibrationCurrentAxis;
@@ -255,7 +270,8 @@ export function HomeScreen() {
 
   const activityLabel = useMemo(() => latestMetrics?.activityState ?? "idle", [latestMetrics]);
   const steps = latestMetrics?.stepCountTotal ?? 0;
-  const progress = Math.min(steps / STEP_GOAL, 1);
+  const stepGoal = currentUser?.role === "patient" ? goalSteps[currentUser.id] ?? DEFAULT_STEP_GOAL : DEFAULT_STEP_GOAL;
+  const progress = Math.min(steps / stepGoal, 1);
   const progressPercent = Math.round(progress * 100);
   const cadence = Math.round(latestMetrics?.cadenceSpm ?? 0);
   const interval = Math.round(latestMetrics?.avgStepIntervalMs ?? 0);
@@ -268,6 +284,88 @@ export function HomeScreen() {
     () => permissionState.pedometer && permissionState.accelerometer && permissionState.gyroscope && permissionState.location,
     [permissionState]
   );
+  const todayCadenceSpm = useMemo(() => {
+    if (!currentUser || currentUser.role !== "patient") {
+      return 0;
+    }
+
+    const now = new Date();
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+
+    const todaysEntries = progressEntries.filter((entry) => {
+      if (entry.patientId !== currentUser.id) {
+        return false;
+      }
+      const recordedAt = new Date(entry.recordedAt).getTime();
+      return recordedAt >= dayStart && recordedAt < dayEnd;
+    });
+
+    if (todaysEntries.length === 0) {
+      return 0;
+    }
+
+    const weightedDuration = todaysEntries.reduce((sum, entry) => sum + Math.max(entry.durationSeconds, 0), 0);
+    if (weightedDuration > 0) {
+      const weightedCadence = todaysEntries.reduce(
+        (sum, entry) => sum + entry.cadenceSpm * Math.max(entry.durationSeconds, 0),
+        0
+      );
+      return weightedCadence / weightedDuration;
+    }
+
+    return todaysEntries.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / todaysEntries.length;
+  }, [currentUser, progressEntries]);
+
+  const overallCadenceSpm = useMemo(() => {
+    if (!currentUser || currentUser.role !== "patient") {
+      return 0;
+    }
+
+    const entries = progressEntries.filter((entry) => entry.patientId === currentUser.id);
+    if (entries.length === 0) {
+      return 0;
+    }
+
+    const weightedDuration = entries.reduce((sum, entry) => sum + Math.max(entry.durationSeconds, 0), 0);
+    if (weightedDuration > 0) {
+      const weightedCadence = entries.reduce(
+        (sum, entry) => sum + entry.cadenceSpm * Math.max(entry.durationSeconds, 0),
+        0
+      );
+      return weightedCadence / weightedDuration;
+    }
+
+    return entries.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / entries.length;
+  }, [currentUser, progressEntries]);
+
+  const cadenceTargetSpm = useMemo(() => {
+    if (!currentUser || currentUser.role !== "patient") {
+      return DEFAULT_CADENCE_TARGET_SPM;
+    }
+
+    return cadenceTargets[currentUser.id] ?? DEFAULT_CADENCE_TARGET_SPM;
+  }, [cadenceTargets, currentUser]);
+
+  const cadenceProgressPercent = useMemo(() => {
+    if (overallCadenceSpm <= 0 || cadenceTargetSpm <= 0) {
+      return 0;
+    }
+
+    return Math.max(0, Math.min(100, Math.round((overallCadenceSpm / cadenceTargetSpm) * 100)));
+  }, [cadenceTargetSpm, overallCadenceSpm]);
+
+  const dailyCadenceStatus = useMemo(() => {
+    if (todayCadenceSpm <= 0) {
+      return "No daily cadence data yet";
+    }
+
+    if (todayCadenceSpm >= cadenceTargetSpm) {
+      return "Daily target achieved";
+    }
+
+    return "Daily target not achieved yet";
+  }, [cadenceTargetSpm, todayCadenceSpm]);
 
   function showErrorToast(message: string) {
     if (Platform.OS === "android") {
@@ -405,6 +503,33 @@ export function HomeScreen() {
       return updated.slice(-TREND_POINTS);
     });
   }, [isRunning, latestMetrics]);
+
+  useEffect(() => {
+    if (!latestMetrics || !isRunning || !startedAt) {
+      return;
+    }
+
+    const elapsedFromStart = latestMetrics.timestamp - startedAt;
+    if (elapsedFromStart < 0) {
+      return;
+    }
+
+    const bucketIndex = Math.floor(elapsedFromStart / SESSION_METRIC_BUCKET_MS);
+    if (bucketIndex <= lastRecordedBucketRef.current) {
+      return;
+    }
+
+    lastRecordedBucketRef.current = bucketIndex;
+    const bucketRecordedAtMs = startedAt + bucketIndex * SESSION_METRIC_BUCKET_MS;
+    const point: SessionMetricPoint = {
+      bucketIndex,
+      recordedAt: new Date(bucketRecordedAtMs).toISOString(),
+      cadenceSpm: Number((latestMetrics.cadenceSpm ?? 0).toFixed(2)),
+      intensity: Number((latestMetrics.intensity ?? 0).toFixed(3)),
+    };
+
+    setSessionTrendPoints((previous) => [...previous, point]);
+  }, [isRunning, latestMetrics, startedAt]);
 
   useEffect(() => {
     if (!isCalibrating) {
@@ -549,6 +674,8 @@ export function HomeScreen() {
       setStartedAt(Date.now());
       setElapsedMs(0);
       setTrend([]);
+      setSessionTrendPoints([]);
+      lastRecordedBucketRef.current = -1;
       setRunning(true);
       setMotionCalibration(null);
       setAwaitingStartConfirmation(false);
@@ -573,6 +700,26 @@ export function HomeScreen() {
   }
 
   function handleStop() {
+    const stopTimestampMs = Date.now();
+
+    if (currentUser?.role === "patient") {
+      void recordProgress({
+        patientId: currentUser.id,
+        sessionId,
+        stepCount: steps,
+        distanceM: Number(distanceFromStepsM.toFixed(2)),
+        durationSeconds: Math.max(Math.round(elapsedMs / 1000), 0),
+        cadenceSpm: Number((latestMetrics?.cadenceSpm ?? 0).toFixed(2)),
+        avgStepIntervalMs: Number((latestMetrics?.avgStepIntervalMs ?? 0).toFixed(2)),
+        intensity: Number((latestMetrics?.intensity ?? 0).toFixed(3)),
+        activityState: latestMetrics?.activityState ?? "idle",
+        trendPoints: sessionTrendPoints,
+        startedAtMs: startedAt ?? undefined,
+        stoppedAtMs: stopTimestampMs,
+        recordedAt: new Date(stopTimestampMs).toISOString(),
+      });
+    }
+
     setRunning(false);
     // Keep latest metrics visible after stop; only clear on next start.
     setAwaitingStartConfirmation(false);
@@ -583,14 +730,30 @@ export function HomeScreen() {
       <ScrollView
         className="flex-1 bg-slate-950"
         contentContainerStyle={{
-          paddingTop: insets.top,
-          paddingBottom: insets.bottom + 24,
+          paddingTop: 20,
+          paddingBottom: 24,
         }}
         showsVerticalScrollIndicator={false}
       >
         <View className="px-5 pb-3 pt-3">
-        <Text className="text-3xl font-black text-white">Step Motion</Text>
-        <Text className="mt-1 text-sm text-slate-300">Live movement dashboard</Text>
+        <Text className="text-3xl font-black text-white">{currentUser?.fullName ?? "Patient Dashboard"}</Text>
+        <Text className="mt-1 text-sm text-slate-300">Live rehab dashboard and progress recorder</Text>
+        </View>
+
+        <View className="mx-5 mb-4 rounded-3xl bg-slate-900 p-5">
+          <View className="flex-row items-center justify-between">
+            <Text className="text-xs uppercase tracking-wide text-slate-300">Cadence Target Progress</Text>
+            <Text className="text-xs font-semibold text-white">{cadenceProgressPercent}%</Text>
+          </View>
+          <View className="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-700">
+            <View className="h-3 rounded-full bg-emerald-400" style={{ width: `${cadenceProgressPercent}%` }} />
+          </View>
+          <Text className="mt-2 text-xs text-slate-300">
+            Total average cadence: {overallCadenceSpm > 0 ? `${overallCadenceSpm.toFixed(1)} spm` : "-"} | Target: {cadenceTargetSpm} spm
+          </Text>
+          <Text className="mt-1 text-xs text-cyan-300">
+            Today: {todayCadenceSpm > 0 ? `${todayCadenceSpm.toFixed(1)} spm` : "-"} | {dailyCadenceStatus}
+          </Text>
         </View>
 
         <View className="mx-5 rounded-3xl bg-slate-900 p-5">
@@ -612,7 +775,7 @@ export function HomeScreen() {
           <View className="h-3 w-full overflow-hidden rounded-full bg-slate-700">
             <View className="h-3 rounded-full bg-cyan-400" style={{ width: `${progressPercent}%` }} />
           </View>
-          <Text className="mt-2 text-xs text-slate-300">{steps} / {STEP_GOAL} steps</Text>
+          <Text className="mt-2 text-xs text-slate-300">{steps} / {stepGoal} steps</Text>
         </View>
 
         <View className="mt-5 flex-row items-center justify-between rounded-2xl bg-slate-800 px-4 py-3">
@@ -657,8 +820,20 @@ export function HomeScreen() {
 
         <View className="mt-4 gap-3 px-5">
         <Text className="text-sm font-semibold text-slate-200">Last 30s Trend</Text>
-        <MiniChart label="Cadence (spm)" values={cadenceSeries} colorClassName="bg-cyan-400" />
-        <MiniChart label="Intensity (%)" values={intensitySeries} colorClassName="bg-fuchsia-400" />
+        <MiniChart
+          label="Cadence (spm)"
+          values={cadenceSeries}
+          colorClassName="bg-cyan-400"
+          fixedMaxValue={150}
+          yAxisRangeLabel="0-150"
+        />
+        <MiniChart
+          label="Intensity (%)"
+          values={intensitySeries}
+          colorClassName="bg-fuchsia-400"
+          fixedMaxValue={100}
+          yAxisRangeLabel="0-100%"
+        />
         </View>
 
         <View className="mt-4 px-5">

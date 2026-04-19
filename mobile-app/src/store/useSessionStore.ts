@@ -10,6 +10,7 @@ type SessionState = {
   setSessionId: (sessionId: string | null) => void;
   setLatestMetrics: (metrics: ProcessedMetrics | null) => void;
   setMotionCalibration: (calibration: MotionCalibration | null) => void;
+  resetSession: () => void;
 };
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -20,5 +21,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   setRunning: (running) => set({ isRunning: running }),
   setSessionId: (sessionId) => set({ sessionId }),
   setLatestMetrics: (metrics) => set({ latestMetrics: metrics }),
-  setMotionCalibration: (calibration) => set({ motionCalibration: calibration })
+  setMotionCalibration: (calibration) => set({ motionCalibration: calibration }),
+  resetSession: () => set({
+    isRunning: false,
+    sessionId: null,
+    latestMetrics: null,
+    motionCalibration: null,
+  })
 }));
