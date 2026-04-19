@@ -4,6 +4,15 @@ export type Vector3 = {
   z: number;
 };
 
+export type AxisName = "x" | "y" | "z";
+
+export type MotionCalibration = {
+  verticalAxis: AxisName;
+  forwardAxis: AxisName;
+  forwardSign: 1 | -1;
+  sampledAt: number;
+};
+
 export type SensorSample = {
   timestamp: number;
   ax: number;

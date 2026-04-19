@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 
-from ..services.firebase_service import write_session_started, write_session_stopped
+from ..services.supabase_service import write_session_started, write_session_stopped
 from ..services.session_service import create_session, end_session
 
 

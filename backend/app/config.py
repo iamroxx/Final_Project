@@ -14,5 +14,5 @@ class Config:
     DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "5000"))
-    FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
-    FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "")
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")

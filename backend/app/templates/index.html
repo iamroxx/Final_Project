@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Step Motion Dashboard</title>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --panel: #111a2b;
+        --text: #e5ecff;
+        --muted: #9ca9c8;
+        --accent: #38bdf8;
+        --ok: #10b981;
+        --warn: #f59e0b;
+        --hot: #f43f5e;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top right, #182647, var(--bg) 45%);
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .title { margin: 0; font-size: 32px; font-weight: 800; }
+      .subtitle { margin: 6px 0 0; color: var(--muted); }
+      .panel {
+        margin-top: 18px;
+        background: linear-gradient(180deg, #131f35, var(--panel));
+        border: 1px solid #23324f;
+        border-radius: 16px;
+        padding: 16px;
+      }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; }
+      .control {
+        display: flex;
+        flex: 1 1 380px;
+        gap: 8px;
+      }
+      input, button {
+        border: 1px solid #33456a;
+        background: #0f182a;
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      input { width: 100%; }
+      button {
+        cursor: pointer;
+        background: linear-gradient(180deg, #22d3ee, #06b6d4);
+        color: #03212b;
+        font-weight: 700;
+      }
+      .badge {
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        display: inline-flex;
+        align-items: center;
+      }
+      .offline { background: #3f1d1d; color: #fecaca; }
+      .online { background: #0f2f22; color: #9ef0c8; }
+      .cards {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 12px;
+      }
+      .card {
+        background: #0d1628;
+        border: 1px solid #253554;
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .label {
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 11px;
+      }
+      .value {
+        margin-top: 8px;
+        font-size: 28px;
+        font-weight: 800;
+      }
+      .activity-idle { color: var(--muted); }
+      .activity-walking { color: var(--ok); }
+      .activity-running { color: var(--hot); }
+      .chart {
+        margin-top: 16px;
+        width: 100%;
+        height: 280px;
+        border-radius: 14px;
+        background: #0a1425;
+        border: 1px solid #253554;
+      }
+      .footer {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      @media (max-width: 640px) {
+        .title { font-size: 24px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="header">
+        <div>
+          <h1 class="title">Smartphone Step & Movement Dashboard</h1>
+          <p class="subtitle">Real-time accelerometer/gyroscope-derived movement analytics</p>
+        </div>
+        <span id="statusBadge" class="badge offline">Disconnected</span>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <div class="control">
+            <input id="sessionIdInput" placeholder="Paste session ID from mobile app" />
+            <button id="connectBtn">Connect</button>
+          </div>
+        </div>
+
+        <div class="cards">
+          <div class="card">
+            <div class="label">Step Count</div>
+            <div id="stepCount" class="value">0</div>
+          </div>
+          <div class="card">
+            <div class="label">Cadence</div>
+            <div id="cadence" class="value">0 spm</div>
+          </div>
+          <div class="card">
+            <div class="label">Avg Step Interval</div>
+            <div id="interval" class="value">0 ms</div>
+          </div>
+          <div class="card">
+            <div class="label">Intensity</div>
+            <div id="intensity" class="value">0%</div>
+          </div>
+          <div class="card">
+            <div class="label">Activity</div>
+            <div id="activity" class="value activity-idle">IDLE</div>
+          </div>
+          <div class="card">
+            <div class="label">Last Update</div>
+            <div id="lastUpdate" class="value" style="font-size:18px">-</div>
+          </div>
+        </div>
+
+        <canvas id="trendCanvas" class="chart"></canvas>
+        <div class="footer">Cadence (cyan) and intensity (amber) rolling trend</div>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        socket: null,
+        sessionId: "",
+        cadence: [],
+        intensity: [],
+        labels: [],
+        maxPoints: 40,
+      };
+
+      const el = {
+        statusBadge: document.getElementById("statusBadge"),
+        sessionIdInput: document.getElementById("sessionIdInput"),
+        connectBtn: document.getElementById("connectBtn"),
+        stepCount: document.getElementById("stepCount"),
+        cadence: document.getElementById("cadence"),
+        interval: document.getElementById("interval"),
+        intensity: document.getElementById("intensity"),
+        activity: document.getElementById("activity"),
+        lastUpdate: document.getElementById("lastUpdate"),
+        trendCanvas: document.getElementById("trendCanvas"),
+      };
+
+      function setConnected(connected) {
+        el.statusBadge.textContent = connected ? "Connected" : "Disconnected";
+        el.statusBadge.className = `badge ${connected ? "online" : "offline"}`;
+      }
+
+      function activityClass(activity) {
+        if (activity === "running") return "activity-running";
+        if (activity === "walking") return "activity-walking";
+        return "activity-idle";
+      }
+
+      function addPoint(cadence, intensity) {
+        const timeLabel = new Date().toLocaleTimeString();
+        state.labels.push(timeLabel);
+        state.cadence.push(cadence);
+        state.intensity.push(intensity * 100);
+        if (state.labels.length > state.maxPoints) {
+          state.labels.shift();
+          state.cadence.shift();
+          state.intensity.shift();
+        }
+      }
+
+      function drawChart() {
+        const canvas = el.trendCanvas;
+        const ctx = canvas.getContext("2d");
+        const dpr = window.devicePixelRatio || 1;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#0a1425";
+        ctx.fillRect(0, 0, width, height);
+
+        const pad = 28;
+        const chartW = width - pad * 2;
+        const chartH = height - pad * 2;
+
+        ctx.strokeStyle = "#2a3a58";
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i += 1) {
+          const y = pad + (i / 4) * chartH;
+          ctx.beginPath();
+          ctx.moveTo(pad, y);
+          ctx.lineTo(width - pad, y);
+          ctx.stroke();
+        }
+
+        const count = state.cadence.length;
+        if (count < 2) return;
+
+        const cadenceMax = Math.max(120, ...state.cadence);
+        const intensityMax = 100;
+
+        function drawSeries(values, maxValue, color) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          values.forEach((v, idx) => {
+            const x = pad + (idx / (count - 1)) * chartW;
+            const y = pad + chartH - (Math.max(0, v) / maxValue) * chartH;
+            if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+
+        drawSeries(state.cadence, cadenceMax, "#22d3ee");
+        drawSeries(state.intensity, intensityMax, "#f59e0b");
+      }
+
+      function connect() {
+        const sessionId = el.sessionIdInput.value.trim();
+        if (!sessionId) {
+          alert("Enter session ID first");
+          return;
+        }
+
+        state.sessionId = sessionId;
+        if (state.socket) {
+          state.socket.disconnect();
+        }
+
+        const socket = io("/metrics", { transports: ["websocket", "polling"] });
+        state.socket = socket;
+
+        socket.on("connect", () => {
+          setConnected(true);
+          socket.emit("subscribe_session", { sessionId }, (ack) => {
+            if (ack && ack.ok === false) {
+              alert(ack.error || "Subscription failed");
+            }
+          });
+        });
+
+        socket.on("disconnect", () => setConnected(false));
+
+        socket.on("metrics", (metrics) => {
+          el.stepCount.textContent = String(metrics.stepCountTotal ?? 0);
+          el.cadence.textContent = `${Math.round(metrics.cadenceSpm ?? 0)} spm`;
+          el.interval.textContent = `${Math.round(metrics.avgStepIntervalMs ?? 0)} ms`;
+          el.intensity.textContent = `${Math.round((metrics.intensity ?? 0) * 100)}%`;
+          const activity = String(metrics.activityState ?? "idle").toLowerCase();
+          el.activity.textContent = activity.toUpperCase();
+          el.activity.className = `value ${activityClass(activity)}`;
+          el.lastUpdate.textContent = new Date(metrics.timestamp || Date.now()).toLocaleTimeString();
+
+          addPoint(Number(metrics.cadenceSpm ?? 0), Number(metrics.intensity ?? 0));
+          drawChart();
+        });
+
+        socket.on("connect_error", (error) => {
+          setConnected(false);
+          console.error("Socket connection error", error);
+        });
+      }
+
+      el.connectBtn.addEventListener("click", connect);
+      window.addEventListener("resize", drawChart);
+      drawChart();
+    </script>
+  </body>
+</html>

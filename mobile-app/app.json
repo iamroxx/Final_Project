@@ -12,7 +12,6 @@
       }
     },
     "android": {
-      "googleServicesFile": "./src/google-services.json",
       "package": "com.imu.stepmotion",
       "permissions": [
         "ACTIVITY_RECOGNITION",
