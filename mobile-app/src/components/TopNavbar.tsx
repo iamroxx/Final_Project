@@ -25,11 +25,15 @@ export function TopNavbar({ currentUser, title, subtitle, onNavigateProfile }: P
       style={{ paddingTop: insets.top + 6 }}
     >
       <View className="flex-row items-center justify-between">
-        <View className="flex-1 pr-3">
-          <Text className="text-lg font-bold text-white">{title}</Text>
-          {subtitle ? (
-            <Text className="mt-0.5 text-xs text-slate-400" numberOfLines={1}>{subtitle}</Text>
-          ) : null}
+        <View className="flex-1 flex-row items-center pr-3">
+          <Text className="mr-3 text-2xl font-black text-cyan-400">SM.</Text>
+          <View className="mr-3 h-7 w-px bg-slate-700" />
+          <View className="flex-1">
+            <Text className="text-base font-bold text-white">{title}</Text>
+            {subtitle ? (
+              <Text className="mt-0.5 text-xs text-slate-400" numberOfLines={1}>{subtitle}</Text>
+            ) : null}
+          </View>
         </View>
 
         <Pressable
