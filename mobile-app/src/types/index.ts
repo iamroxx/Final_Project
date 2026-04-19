@@ -42,3 +42,38 @@ export type ProcessedMetrics = {
   intensity: number;
   activityState: "idle" | "walking" | "running";
 };
+
+export type UserRole = "doctor" | "patient";
+
+export type AppRoute = "home" | "dashboard" | "progress" | "patients" | "patient-detail" | "patient-targets";
+
+export type AppUser = {
+  id: string;
+  email: string;
+  fullName: string;
+  patientCode?: string;
+  role: UserRole;
+  assignedPatientIds?: string[];
+};
+
+export type ProgressEntry = {
+  id: string;
+  patientId: string;
+  sessionId?: string | null;
+  recordedAt: string;
+  stepCount: number;
+  distanceM: number;
+  durationSeconds: number;
+  cadenceSpm: number;
+  avgStepIntervalMs: number;
+  intensity: number;
+  activityState: "idle" | "walking" | "running";
+  notes?: string;
+};
+
+export type SessionMetricPoint = {
+  bucketIndex: number;
+  recordedAt: string;
+  cadenceSpm: number;
+  intensity: number;
+};
