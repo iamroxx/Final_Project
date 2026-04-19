@@ -8,6 +8,8 @@ def detect_step_timestamps(
     min_interval_ms: int,
     last_step_timestamp: Optional[int],
     gyro_magnitudes: Optional[List[float]] = None,
+    gyro_confirm_threshold: float = 0.2,
+    gyro_window: int = 4,
 ) -> List[int]:
     if len(timestamps) != len(magnitudes):
         return []
@@ -15,8 +17,6 @@ def detect_step_timestamps(
     # Gyro confirmation: a real step produces body rotation (leg swing).
     # Vibrations / chair movements typically lack this rotation signature.
     # Threshold: 0.2 rad/s (noise at rest ~0.01-0.05, walking swing ~0.3-1.5 rad/s)
-    GYRO_CONFIRM_THRESHOLD = 0.2
-    GYRO_WINDOW = 4  # samples each side (~80ms at 50Hz)
     use_gyro = gyro_magnitudes is not None and len(gyro_magnitudes) == len(magnitudes)
 
     steps: List[int] = []
@@ -30,10 +30,10 @@ def detect_step_timestamps(
 
         # Gyro cross-validation: peak gyro in ±GYRO_WINDOW samples must exceed threshold
         if use_gyro:
-            lo = max(0, i - GYRO_WINDOW)
-            hi = min(len(gyro_magnitudes) - 1, i + GYRO_WINDOW)  # type: ignore[index]
+            lo = max(0, i - gyro_window)
+            hi = min(len(gyro_magnitudes) - 1, i + gyro_window)  # type: ignore[index]
             peak_gyro = max(gyro_magnitudes[lo : hi + 1])  # type: ignore[index]
-            if peak_gyro < GYRO_CONFIRM_THRESHOLD:
+            if peak_gyro < gyro_confirm_threshold:
                 continue  # acc peak without gyro rotation → not a step
 
         current_ts = timestamps[i]

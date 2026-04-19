@@ -1,16 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Linking, Modal, PermissionsAndroid, Platform, Pressable, ScrollView, Text, ToastAndroid, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Animated, Easing, Linking, Modal, PermissionsAndroid, Platform, Pressable, ScrollView, Text, ToastAndroid, View } from "react-native";
 import { Accelerometer, Gyroscope, Pedometer } from "expo-sensors";
 import * as Location from "expo-location";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MetricCard } from "../components/MetricCard";
 import { useSensorStream } from "../services/sensors/useSensorStream";
-import { startSession, stopSession } from "../services/api/sessionApi";
-import { ensureAnonymousUser } from "../services/firebase/auth";
 import { useSessionStore } from "../store/useSessionStore";
 
 const STEP_GOAL = 4000;
 const TREND_POINTS = 30;
+const STEP_LENGTH_M = 0.78;
 
 type TrendPoint = {
   cadence: number;
@@ -23,6 +22,18 @@ type PermissionState = {
   gyroscope: boolean;
   location: boolean;
 };
+
+type AxisName = "x" | "y" | "z";
+
+type AxisVector = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+type GlowSide = "left" | "right" | "top" | "bottom";
+
+
 
 function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -43,6 +54,34 @@ function getActivityPillClass(activity: "idle" | "walking" | "running") {
     return "bg-emerald-100 text-emerald-700";
   }
   return "bg-slate-200 text-slate-700";
+}
+
+function axisLabel(axis: "x" | "y" | "z") {
+  if (axis === "x") {
+    return "X";
+  }
+  if (axis === "y") {
+    return "Y";
+  }
+  return "Z";
+}
+
+function absoluteDominantAxis(values: AxisVector, excludedAxis?: AxisName | null): AxisName {
+  const candidates: AxisName[] = ["x", "y", "z"].filter((axis): axis is AxisName => axis !== excludedAxis);
+  return candidates.reduce((bestAxis, axis) => {
+    return Math.abs(values[axis]) > Math.abs(values[bestAxis]) ? axis : bestAxis;
+  }, candidates[0]);
+}
+
+function formatAxisValue(value: number): string {
+  return value.toFixed(3);
+}
+
+function getGlowSide(axis: AxisName, sign: 1 | -1): GlowSide {
+  if (axis === "x") {
+    return sign > 0 ? "right" : "left";
+  }
+  return sign > 0 ? "top" : "bottom";
 }
 
 type MiniChartProps = {
@@ -76,6 +115,16 @@ function MiniChart({ label, values, colorClassName }: MiniChartProps) {
 export function HomeScreen() {
   const insets = useSafeAreaInsets();
   const [startError, setStartError] = useState<string | null>(null);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [awaitingStartConfirmation, setAwaitingStartConfirmation] = useState(false);
+  const [tiltAxes, setTiltAxes] = useState<AxisVector>({ x: 0, y: 0, z: 0 });
+  const [motionAxes, setMotionAxes] = useState<AxisVector>({ x: 0, y: 0, z: 0 });
+  const [calibrationVerticalAxis, setCalibrationVerticalAxis] = useState<AxisName | null>(null);
+  const [calibrationCurrentAxis, setCalibrationCurrentAxis] = useState<AxisName | null>(null);
+  const [calibrationForwardAxis, setCalibrationForwardAxis] = useState<AxisName | null>(null);
+  const [calibrationForwardSign, setCalibrationForwardSign] = useState<1 | -1 | null>(null);
+  const [axisHoldProgressMs, setAxisHoldProgressMs] = useState(0);
+  const [axisCandidateLabel, setAxisCandidateLabel] = useState<string>("waiting for motion...");
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
@@ -90,14 +139,105 @@ export function HomeScreen() {
     isRunning,
     sessionId,
     latestMetrics,
+    motionCalibration,
     setRunning,
     setSessionId,
-    setLatestMetrics
+    setLatestMetrics,
+    setMotionCalibration
   } = useSessionStore();
+  const gravityRef = useRef<AxisVector>({ x: 0, y: 0, z: 0 });
+  const hasGravityBaselineRef = useRef(false);
+  const calibrationLockedRef = useRef(false);
+  // Cumulative absolute-value sum per axis over the 3-second walk window.
+  const accumRef = useRef<AxisVector>({ x: 0, y: 0, z: 0 });
+  // Cumulative signed sum per axis — used to determine forward direction.
+  const signedAccumRef = useRef<AxisVector>({ x: 0, y: 0, z: 0 });
+  // Timestamp of the first sample after calibration begins.
+  const calibrationStartRef = useRef(0);
+  const glowOpacity = useRef(new Animated.Value(0)).current;
+
+  const calibrationDisplayAxis = calibrationForwardAxis ?? calibrationCurrentAxis;
+  const calibrationDisplaySign: 1 | -1 | null = useMemo(() => {
+    if (!calibrationDisplayAxis) {
+      return null;
+    }
+    if (calibrationForwardAxis && calibrationForwardSign) {
+      return calibrationForwardSign;
+    }
+    return motionAxes[calibrationDisplayAxis] >= 0 ? 1 : -1;
+  }, [calibrationDisplayAxis, calibrationForwardAxis, calibrationForwardSign, motionAxes]);
+
+  const activeGlowSide: GlowSide | null = useMemo(() => {
+    if (!calibrationDisplayAxis || !calibrationDisplaySign) {
+      return null;
+    }
+    return getGlowSide(calibrationDisplayAxis, calibrationDisplaySign);
+  }, [calibrationDisplayAxis, calibrationDisplaySign]);
+
+  const gradientGlowLayers = useMemo(() => {
+    if (!activeGlowSide) {
+      return [] as Array<{ style: Record<string, string | number>; alpha: number }>;
+    }
+
+    const steps = 10;
+    const layers: Array<{ style: Record<string, string | number>; alpha: number }> = [];
+    for (let i = 0; i < steps; i += 1) {
+      const startPct = (i / steps) * 50;
+      const sizePct = 50 / steps;
+      const alpha = Math.max(0, 1 - i / (steps - 1));
+
+      if (activeGlowSide === "left") {
+        layers.push({
+          style: { left: `${startPct}%`, top: 0, bottom: 0, width: `${sizePct}%` },
+          alpha,
+        });
+      } else if (activeGlowSide === "right") {
+        layers.push({
+          style: { right: `${startPct}%`, top: 0, bottom: 0, width: `${sizePct}%` },
+          alpha,
+        });
+      } else if (activeGlowSide === "top") {
+        layers.push({
+          style: { top: `${startPct}%`, left: 0, right: 0, height: `${sizePct}%` },
+          alpha,
+        });
+      } else {
+        layers.push({
+          style: { bottom: `${startPct}%`, left: 0, right: 0, height: `${sizePct}%` },
+          alpha,
+        });
+      }
+    }
+
+    return layers;
+  }, [activeGlowSide]);
+
+  useEffect(() => {
+    if (!isCalibrating || !activeGlowSide) {
+      glowOpacity.stopAnimation();
+      glowOpacity.setValue(0);
+      return;
+    }
+
+    glowOpacity.stopAnimation();
+    glowOpacity.setValue(0);
+    Animated.timing(glowOpacity, {
+      toValue: 0.9,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+
+    return () => {
+      glowOpacity.stopAnimation();
+      glowOpacity.setValue(0);
+    };
+  }, [activeGlowSide, glowOpacity, isCalibrating]);
 
   const { sampleCount, streamError } = useSensorStream({
     enabled: isRunning,
     sessionId,
+    motionCalibration,
     onMetrics: setLatestMetrics
   });
 
@@ -120,6 +260,8 @@ export function HomeScreen() {
   const cadence = Math.round(latestMetrics?.cadenceSpm ?? 0);
   const interval = Math.round(latestMetrics?.avgStepIntervalMs ?? 0);
   const intensity = Math.round((latestMetrics?.intensity ?? 0) * 100);
+  const distanceFromStepsM = steps * STEP_LENGTH_M;
+  const strideLengthM = !isRunning && steps > 0 ? distanceFromStepsM / steps : 0;
   const cadenceSeries = useMemo(() => trend.map((point) => point.cadence), [trend]);
   const intensitySeries = useMemo(() => trend.map((point) => point.intensity), [trend]);
   const allPermissionsGranted = useMemo(
@@ -264,6 +406,117 @@ export function HomeScreen() {
     });
   }, [isRunning, latestMetrics]);
 
+  useEffect(() => {
+    if (!isCalibrating) {
+      return;
+    }
+
+    calibrationLockedRef.current = false;
+    hasGravityBaselineRef.current = false;
+    accumRef.current = { x: 0, y: 0, z: 0 };
+    signedAccumRef.current = { x: 0, y: 0, z: 0 };
+    calibrationStartRef.current = 0;
+    setTiltAxes({ x: 0, y: 0, z: 0 });
+    setMotionAxes({ x: 0, y: 0, z: 0 });
+    setCalibrationVerticalAxis(null);
+    setCalibrationCurrentAxis(null);
+    setCalibrationForwardAxis(null);
+    setCalibrationForwardSign(null);
+    setAxisHoldProgressMs(0);
+    setAxisCandidateLabel("Walk naturally for 3 seconds...");
+
+    const CALIBRATION_DURATION_MS = 3000;
+    const GRAVITY_ALPHA = 0.02;
+
+    Accelerometer.setUpdateInterval(50);
+
+    const sub = Accelerometer.addListener((acc) => {
+      // Update slow gravity EMA — used only to identify the vertical axis.
+      if (!hasGravityBaselineRef.current) {
+        gravityRef.current = { x: acc.x, y: acc.y, z: acc.z };
+        hasGravityBaselineRef.current = true;
+      } else {
+        gravityRef.current = {
+          x: GRAVITY_ALPHA * acc.x + (1 - GRAVITY_ALPHA) * gravityRef.current.x,
+          y: GRAVITY_ALPHA * acc.y + (1 - GRAVITY_ALPHA) * gravityRef.current.y,
+          z: GRAVITY_ALPHA * acc.z + (1 - GRAVITY_ALPHA) * gravityRef.current.z,
+        };
+      }
+
+      setTiltAxes({ x: acc.x, y: acc.y, z: acc.z });
+      const verticalAxis = absoluteDominantAxis(gravityRef.current);
+      setCalibrationVerticalAxis(verticalAxis);
+      const linear = {
+        x: acc.x - gravityRef.current.x,
+        y: acc.y - gravityRef.current.y,
+        z: acc.z - gravityRef.current.z,
+      };
+      setMotionAxes(linear);
+
+      if (calibrationLockedRef.current) {
+        return;
+      }
+
+      const now = Date.now();
+      // Record the start time on the very first live sample.
+      if (calibrationStartRef.current === 0) {
+        calibrationStartRef.current = now;
+      }
+
+      // Accumulate absolute values per axis — whichever axis has the most
+      // total movement after 3 seconds wins.
+      accumRef.current.x += Math.abs(acc.x);
+      accumRef.current.y += Math.abs(acc.y);
+      accumRef.current.z += Math.abs(acc.z);
+      // Signed sum lets us determine forward vs. backward direction.
+      signedAccumRef.current.x += acc.x;
+      signedAccumRef.current.y += acc.y;
+      signedAccumRef.current.z += acc.z;
+
+      const elapsed = now - calibrationStartRef.current;
+      setAxisHoldProgressMs(Math.min(elapsed, CALIBRATION_DURATION_MS));
+
+      // Identify the non-vertical axis currently leading.
+      const horizontalAxes: AxisName[] = (["x", "y", "z"] as AxisName[]).filter(
+        (a): a is AxisName => a !== verticalAxis
+      );
+      const h0 = horizontalAxes[0];
+      const h1 = horizontalAxes[1];
+      const leadingAxis: AxisName = accumRef.current[h0] >= accumRef.current[h1] ? h0 : h1;
+      setCalibrationCurrentAxis(leadingAxis);
+      setAxisCandidateLabel(
+        `Walk... ${(elapsed / 1000).toFixed(1)}s / 3.0s — leading: ${axisLabel(leadingAxis)}`
+      );
+
+      if (elapsed < CALIBRATION_DURATION_MS) {
+        return;
+      }
+
+      // ── 3 seconds complete — lock the winner ───────────────────────────────
+      const forwardAxis = leadingAxis;
+      const forwardSign: 1 | -1 = signedAccumRef.current[forwardAxis] >= 0 ? 1 : -1;
+      calibrationLockedRef.current = true;
+      setCalibrationForwardAxis(forwardAxis);
+      setCalibrationForwardSign(forwardSign);
+      setMotionCalibration({
+        verticalAxis,
+        forwardAxis,
+        forwardSign,
+        sampledAt: Date.now(),
+      });
+      setAwaitingStartConfirmation(true);
+      setIsCalibrating(false);
+      setStartError(
+        `Locked on ${forwardSign > 0 ? "+" : "-"}${axisLabel(forwardAxis)} ` +
+        `(most active axis over 3s). Tap Start Session to begin.`
+      );
+    });
+
+    return () => {
+      sub.remove();
+    };
+  }, [isCalibrating, setMotionCalibration]);
+
   async function handleStart() {
     if (isRunning) {
       return;
@@ -290,21 +543,24 @@ export function HomeScreen() {
         throw new Error("Pedometer is not available on this device.");
       }
 
-      const user = await ensureAnonymousUser();
-      const result = await startSession(user.uid);
-      setSessionId(result.sessionId);
+      const localSessionId = `local-${Date.now()}`;
+      setSessionId(localSessionId);
+      setLatestMetrics(null);
       setStartedAt(Date.now());
       setElapsedMs(0);
       setTrend([]);
       setRunning(true);
+      setMotionCalibration(null);
+      setAwaitingStartConfirmation(false);
+      setIsCalibrating(false);
+      setStartError(null);
 
       console.info("[session-start][success]", {
         at: new Date().toISOString(),
-        userId: user.uid,
-        sessionId: result.sessionId
+        sessionId: localSessionId
       });
     } catch (error) {
-      const fallbackMessage = "Failed to start session. Check Firebase Auth settings and try again.";
+      const fallbackMessage = "Failed to start local session. Check sensor permissions and try again.";
       const message = error instanceof Error ? error.message : fallbackMessage;
       setStartError(message);
 
@@ -312,24 +568,14 @@ export function HomeScreen() {
         at: new Date().toISOString(),
         error: message
       });
+      setIsCalibrating(false);
     }
   }
 
-  async function handleStop() {
-    if (!sessionId) {
-      setRunning(false);
-      return;
-    }
-    try {
-      await stopSession(sessionId);
-      setRunning(false);
-      setSessionId(null);
-      setStartedAt(null);
-    } catch (error) {
-      const fallbackMessage = "Failed to stop session. Please try again.";
-      const message = error instanceof Error ? error.message : fallbackMessage;
-      setStartError(message);
-    }
+  function handleStop() {
+    setRunning(false);
+    // Keep latest metrics visible after stop; only clear on next start.
+    setAwaitingStartConfirmation(false);
   }
 
   return (
@@ -394,6 +640,16 @@ export function HomeScreen() {
           value={`${intensity}%`}
         />
         <MetricCard
+          label="Distance"
+          value={distanceFromStepsM >= 1000
+            ? `${(distanceFromStepsM / 1000).toFixed(2)} km`
+            : `${distanceFromStepsM.toFixed(1)} m`}
+        />
+        <MetricCard
+          label="Stride Length"
+          value={`${strideLengthM.toFixed(2)} m`}
+        />
+        <MetricCard
           label="Samples"
           value={String(sampleCount)}
         />
@@ -407,6 +663,11 @@ export function HomeScreen() {
 
         <View className="mt-4 px-5">
         <Text className="text-sm text-slate-300">Session ID: {sessionId ?? "-"}</Text>
+        {motionCalibration ? (
+          <Text className="mt-1 text-sm text-slate-300">
+            Axes: Forward {motionCalibration.forwardSign > 0 ? "+" : "-"}{axisLabel(motionCalibration.forwardAxis)} | Vertical {axisLabel(motionCalibration.verticalAxis)}
+          </Text>
+        ) : null}
         {startError ? (
           <Text className="mt-2 text-sm text-red-600">{startError}</Text>
         ) : null}
@@ -419,10 +680,12 @@ export function HomeScreen() {
         <Pressable
           onPressIn={() => logClick("start_session_button")}
           onPress={handleStart}
-          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning || !allPermissionsGranted ? "bg-slate-600" : "bg-cyan-500"}`}
-          disabled={isRunning || !allPermissionsGranted}
+          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning || !allPermissionsGranted || isCalibrating ? "bg-slate-600" : "bg-cyan-500"}`}
+          disabled={isRunning || !allPermissionsGranted || isCalibrating}
         >
-          <Text className="text-center text-base font-semibold text-slate-950">Start Session</Text>
+          <Text className="text-center text-base font-semibold text-slate-950">
+            Start Session
+          </Text>
         </Pressable>
 
         <Pressable
@@ -435,6 +698,92 @@ export function HomeScreen() {
         </Pressable>
         </View>
       </ScrollView>
+
+      <Modal
+        visible={isCalibrating}
+        transparent
+        animationType="fade"
+      >
+        <View className="flex-1 items-center justify-center bg-black/70 px-6">
+          <View className="relative w-full overflow-hidden rounded-3xl border border-slate-700 bg-slate-900 p-5">
+            {gradientGlowLayers.length > 0 ? (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  {
+                    position: "absolute",
+                    opacity: glowOpacity,
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    bottom: 0,
+                  },
+                ]}
+              >
+                {gradientGlowLayers.map((layer, index) => (
+                  <View
+                    key={`glow-${activeGlowSide}-${index}`}
+                    pointerEvents="none"
+                    style={[
+                      {
+                        position: "absolute",
+                        backgroundColor: `rgba(34, 211, 238, ${layer.alpha})`,
+                      },
+                      layer.style,
+                    ]}
+                  />
+                ))}
+              </Animated.View>
+            ) : null}
+            <Text className="text-xl font-black text-white">Live Calibration</Text>
+            <Text className="mt-2 text-sm text-slate-300">
+              Walk naturally for 3 seconds. The axis with the most total movement becomes your forward direction.
+            </Text>
+
+            <View className="mt-4 rounded-2xl bg-slate-800 p-3">
+              <Text className="text-xs uppercase tracking-wide text-slate-300">Tilt (gravity + orientation)</Text>
+              <Text className="mt-2 text-sm text-slate-100">X: {formatAxisValue(tiltAxes.x)}  Y: {formatAxisValue(tiltAxes.y)}  Z: {formatAxisValue(tiltAxes.z)}</Text>
+            </View>
+
+            <View className="mt-3 rounded-2xl bg-slate-800 p-3">
+              <Text className="text-xs uppercase tracking-wide text-slate-300">Motion (linear acceleration)</Text>
+              <Text className="mt-2 text-sm text-slate-100">X: {formatAxisValue(motionAxes.x)}  Y: {formatAxisValue(motionAxes.y)}  Z: {formatAxisValue(motionAxes.z)}</Text>
+            </View>
+
+            <View className="mt-3 rounded-2xl bg-slate-800 p-3">
+              <View className="flex-row gap-6">
+                <Text className="text-sm text-slate-100">
+                  Vertical: <Text className="font-semibold text-white">{calibrationVerticalAxis ? axisLabel(calibrationVerticalAxis) : "-"}</Text>
+                </Text>
+                <Text className="text-sm text-slate-100">
+                  Forward: <Text className="font-semibold text-white">
+                    {calibrationDisplayAxis && calibrationDisplaySign
+                      ? `${calibrationDisplaySign > 0 ? "+" : "-"}${axisLabel(calibrationDisplayAxis)}`
+                      : "-"}
+                  </Text>
+                </Text>
+              </View>
+              {!calibrationForwardAxis ? (
+                <Text className="mt-1 text-xs text-slate-300">
+                  {axisCandidateLabel} ({Math.floor((axisHoldProgressMs / 3000) * 100)}%)
+                </Text>
+              ) : null}
+            </View>
+
+            <Pressable
+              onPress={() => {
+                setIsCalibrating(false);
+                setAwaitingStartConfirmation(false);
+                setMotionCalibration(null);
+                setStartError("Calibration canceled. Tap Start Session to calibrate again.");
+              }}
+              className="mt-5 rounded-2xl bg-slate-700 px-4 py-3"
+            >
+              <Text className="text-center text-sm font-semibold text-white">Cancel Calibration</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={!allPermissionsGranted}

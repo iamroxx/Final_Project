@@ -17,8 +17,11 @@ def create_session(user_id: str) -> dict:
         "stoppedAt": None,
         "stepCountTotal": 0,
         "lastStepTimestamp": None,
+        "lastCadenceStepTimestamp": None,
         "recentIntervalsMs": [],
         "hwStepCountLast": 0,
+        "hwCadenceHistory": [],
+        "lastCadenceSpm": 0.0,
     }
 
     return {"sessionId": session_id, "startedAt": started_at}
