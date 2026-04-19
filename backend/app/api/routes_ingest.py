@@ -1,6 +1,7 @@
 from flask import Blueprint, jsonify, request
 
-from ..services.firebase_service import write_live_metrics
+from ..extensions import socketio
+from ..services.supabase_service import write_live_metrics
 from ..services.session_service import get_session
 from ..services.step_service import process_sensor_batch
 
@@ -41,5 +42,6 @@ def ingest_sensor_batch():
     )
 
     write_live_metrics(session_id=session_id, metrics=metrics)
+    socketio.emit("metrics", metrics, room=session_id, namespace="/metrics")
 
     return jsonify({"metrics": metrics}), 200

@@ -4,7 +4,7 @@ Monorepo starter for a real-time movement analysis app using:
 
 - React Native (Expo) + NativeWind for mobile UI and sensor capture
 - Flask for signal processing and step/activity analytics
-- Firebase (Auth + Firestore) for real-time persistence and multi-device visibility
+- Supabase (Postgres + Realtime-ready API) for persistence and multi-device visibility
 
 ## Repository Structure
 
@@ -48,16 +48,16 @@ pip install -r requirements.txt
 python run.py
 ```
 
-1. Optional: verify Firebase connectivity:
+1. Optional: verify Supabase connectivity:
 
 ```bash
-python check_firebase_connection.py
+python check_supabase_connection.py
 ```
 
 Continuous check every 10 seconds:
 
 ```bash
-python check_firebase_connection.py --watch --interval 10
+python check_supabase_connection.py --watch --interval 10
 ```
 
 Default API endpoint: `http://localhost:5000`
@@ -67,11 +67,29 @@ Default API endpoint: `http://localhost:5000`
 1. Mobile starts a session (`POST /api/session/start`).
 2. Mobile streams sensor windows (`POST /api/ingest`).
 3. Flask computes step count, cadence, interval, and activity state.
-4. Flask writes metrics to Firestore.
-5. Any connected client can observe updates from Firestore in realtime.
+4. Flask writes metrics to Supabase.
+5. Flask broadcasts each metrics frame over Socket.IO namespace `/metrics`.
+6. PC dashboard subscribes with `sessionId` and renders live cards + trend chart.
 
-## 4) Notes
+## 4) PC Dashboard (Built-In)
+
+The backend now serves a real-time dashboard page directly.
+
+1. Start backend server (`python run.py`).
+2. Open `http://localhost:5000/dashboard` on your PC browser.
+3. Paste the active `Session ID` from mobile and press **Connect**.
+
+Dashboard receives live updates from WebSocket events (`metrics`) and shows:
+
+- Step count
+- Cadence (spm)
+- Step interval (ms)
+- Intensity (%)
+- Activity state (idle/walking/running)
+- Rolling trend chart (cadence + intensity)
+
+## 5) Notes
 
 - This scaffold focuses on clean architecture and working data contracts.
 - Step detection thresholds are intentionally simple and should be tuned per phone placement.
-- Firebase writes are no-op if admin credentials are not configured.
+- Supabase writes are skipped if `SUPABASE_URL` or `SUPABASE_SERVICE_ROLE_KEY` are not configured.
