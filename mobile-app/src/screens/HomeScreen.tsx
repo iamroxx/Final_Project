@@ -10,6 +10,7 @@ import type { SessionMetricPoint } from "../types";
 
 const DEFAULT_STEP_GOAL = 100;
 const DEFAULT_CADENCE_TARGET_SPM = 70;
+const CADENCE_AVERAGE_WINDOW_DAYS = 7;
 const TREND_POINTS = 30;
 const STEP_LENGTH_M = 0.78;
 const SESSION_METRIC_BUCKET_MS = 3000;
@@ -17,6 +18,22 @@ const SESSION_METRIC_BUCKET_MS = 3000;
 type TrendPoint = {
   cadence: number;
   intensity: number;
+};
+
+type SessionReport = {
+  patientId: string;
+  sessionId?: string | null;
+  stepCount: number;
+  distanceM: number;
+  durationSeconds: number;
+  cadenceSpm: number;
+  avgStepIntervalMs: number;
+  intensity: number;
+  activityState: "idle" | "walking" | "running";
+  trendPoints: SessionMetricPoint[];
+  startedAtMs?: number;
+  stoppedAtMs: number;
+  recordedAt: string;
 };
 
 type PermissionState = {
@@ -135,6 +152,10 @@ export function HomeScreen() {
   const [axisCandidateLabel, setAxisCandidateLabel] = useState<string>("waiting for motion...");
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [showStopConfirmModal, setShowStopConfirmModal] = useState(false);
+  const [showEarlyStopWarningModal, setShowEarlyStopWarningModal] = useState(false);
+  const [pendingSessionReport, setPendingSessionReport] = useState<SessionReport | null>(null);
+  const [isSavingSessionReport, setIsSavingSessionReport] = useState(false);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [sessionTrendPoints, setSessionTrendPoints] = useState<SessionMetricPoint[]>([]);
   const [permissionState, setPermissionState] = useState<PermissionState>({
@@ -148,6 +169,7 @@ export function HomeScreen() {
   const goalSteps = useAppStore((state) => state.goalSteps);
   const cadenceTargets = useAppStore((state) => state.cadenceTargets);
   const progressEntries = useAppStore((state) => state.progressEntries);
+  const patientSchedules = useAppStore((state) => state.patientSchedules);
   const recordProgress = useAppStore((state) => state.recordProgress);
   const {
     isRunning,
@@ -317,12 +339,21 @@ export function HomeScreen() {
     return todaysEntries.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / todaysEntries.length;
   }, [currentUser, progressEntries]);
 
-  const overallCadenceSpm = useMemo(() => {
+  const sevenDayAverageCadenceSpm = useMemo(() => {
     if (!currentUser || currentUser.role !== "patient") {
       return 0;
     }
 
-    const entries = progressEntries.filter((entry) => entry.patientId === currentUser.id);
+    const windowStart = Date.now() - CADENCE_AVERAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const entries = progressEntries.filter((entry) => {
+      if (entry.patientId !== currentUser.id) {
+        return false;
+      }
+
+      const recordedAt = new Date(entry.recordedAt).getTime();
+      return Number.isFinite(recordedAt) && recordedAt >= windowStart;
+    });
+
     if (entries.length === 0) {
       return 0;
     }
@@ -348,12 +379,12 @@ export function HomeScreen() {
   }, [cadenceTargets, currentUser]);
 
   const cadenceProgressPercent = useMemo(() => {
-    if (overallCadenceSpm <= 0 || cadenceTargetSpm <= 0) {
+    if (sevenDayAverageCadenceSpm <= 0 || cadenceTargetSpm <= 0) {
       return 0;
     }
 
-    return Math.max(0, Math.min(100, Math.round((overallCadenceSpm / cadenceTargetSpm) * 100)));
-  }, [cadenceTargetSpm, overallCadenceSpm]);
+    return Math.max(0, Math.min(100, Math.round((sevenDayAverageCadenceSpm / cadenceTargetSpm) * 100)));
+  }, [cadenceTargetSpm, sevenDayAverageCadenceSpm]);
 
   const dailyCadenceStatus = useMemo(() => {
     if (todayCadenceSpm <= 0) {
@@ -367,6 +398,100 @@ export function HomeScreen() {
     return "Daily target not achieved yet";
   }, [cadenceTargetSpm, todayCadenceSpm]);
 
+  // ── Schedule gate ──────────────────────────────────────────────────────────
+  // Returns a human-readable reason why the session cannot start, or null if allowed.
+  const scheduleGate = useMemo((): string | null => {
+    if (!currentUser || currentUser.role !== "patient") return null;
+    const schedule = patientSchedules[currentUser.id];
+    if (!schedule) return "No schedule assigned yet. Ask your doctor to set a schedule.";
+
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
+    // Date range check
+    if (schedule.startDate && todayStr < schedule.startDate) {
+      return `Schedule starts on ${schedule.startDate}. Sessions are not available yet.`;
+    }
+    if (schedule.endDate && todayStr > schedule.endDate) {
+      return `Schedule ended on ${schedule.endDate}. Ask your doctor to extend it.`;
+    }
+
+    // Weekday check (0=Sun … 6=Sat)
+    const todayDow = now.getDay();
+    if (!schedule.activeDays.includes(todayDow)) {
+      const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const allowedNames = schedule.activeDays.map((d) => dayNames[d]).join(", ");
+      return `Today is not a scheduled walking day. Active days: ${allowedNames}.`;
+    }
+
+    // Count today's completed sessions
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+    const todayEntries = progressEntries.filter((e) => {
+      if (e.patientId !== currentUser.id) return false;
+      const t = new Date(e.recordedAt).getTime();
+      return t >= dayStart && t < dayEnd;
+    });
+
+    if (todayEntries.length >= schedule.sessionsPerDay) {
+      return `Daily session limit reached (${schedule.sessionsPerDay}/${schedule.sessionsPerDay}). Come back tomorrow.`;
+    }
+
+    // Cooloff check — time since last session ended
+    if (todayEntries.length > 0) {
+      const lastEntry = todayEntries.reduce((latest, e) =>
+        new Date(e.recordedAt).getTime() > new Date(latest.recordedAt).getTime() ? e : latest
+      );
+      const lastEndMs = new Date(lastEntry.recordedAt).getTime();
+      const cooloffMs = schedule.cooloffMinutes * 60 * 1000;
+      const nextAllowedMs = lastEndMs + cooloffMs;
+      if (now.getTime() < nextAllowedMs) {
+        const remainingMs = nextAllowedMs - now.getTime();
+        const remainMins = Math.ceil(remainingMs / 60000);
+        return `Cooloff period active. Next session available in ${remainMins} min.`;
+      }
+    }
+
+    return null; // All checks passed — session is allowed
+  }, [currentUser, patientSchedules, progressEntries]);
+
+  // ── Schedule: session duration limit ──────────────────────────────────────
+  // Auto-stop when the doctor-assigned duration elapses.
+  useEffect(() => {
+    if (!isRunning || !startedAt || !currentUser || currentUser.role !== "patient") return;
+    const schedule = patientSchedules[currentUser.id];
+    if (!schedule || schedule.sessionDurationMinutes <= 0) return;
+
+    const limitMs = schedule.sessionDurationMinutes * 60 * 1000;
+    const remaining = limitMs - elapsedMs;
+    if (remaining <= 0) {
+      handleStop();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      handleStop();
+    }, remaining);
+
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, startedAt, patientSchedules, currentUser]);
+
+  // Derived: remaining session time based on doctor schedule (for display)
+  const scheduledDurationMs = useMemo(() => {
+    if (!currentUser || currentUser.role !== "patient") return null;
+    const schedule = patientSchedules[currentUser.id];
+    if (!schedule || schedule.sessionDurationMinutes <= 0) return null;
+    return schedule.sessionDurationMinutes * 60 * 1000;
+  }, [currentUser, patientSchedules]);
+
+  const sessionTimeRemainingMs = useMemo(() => {
+    if (!isRunning || scheduledDurationMs === null) return null;
+    return Math.max(0, scheduledDurationMs - elapsedMs);
+  }, [isRunning, scheduledDurationMs, elapsedMs]);
+
+  const isStartBlocked = Boolean(scheduleGate) && !isRunning;
+
   function showErrorToast(message: string) {
     if (Platform.OS === "android") {
       ToastAndroid.show(message, ToastAndroid.SHORT);
@@ -374,6 +499,15 @@ export function HomeScreen() {
     }
 
     Alert.alert("Error", message);
+  }
+
+  function showSuccessToast(message: string) {
+    if (Platform.OS === "android") {
+      ToastAndroid.show(message, ToastAndroid.SHORT);
+      return;
+    }
+
+    Alert.alert("Success", message);
   }
 
   async function requestStartupPermissions() {
@@ -703,7 +837,7 @@ export function HomeScreen() {
     const stopTimestampMs = Date.now();
 
     if (currentUser?.role === "patient") {
-      void recordProgress({
+      const report: SessionReport = {
         patientId: currentUser.id,
         sessionId,
         stepCount: steps,
@@ -717,12 +851,55 @@ export function HomeScreen() {
         startedAtMs: startedAt ?? undefined,
         stoppedAtMs: stopTimestampMs,
         recordedAt: new Date(stopTimestampMs).toISOString(),
-      });
+      };
+
+      setPendingSessionReport(report);
+      setShowStopConfirmModal(true);
     }
 
     setRunning(false);
     // Keep latest metrics visible after stop; only clear on next start.
     setAwaitingStartConfirmation(false);
+  }
+
+  function handleCancelSessionSave() {
+    setShowStopConfirmModal(false);
+    setPendingSessionReport(null);
+  }
+
+  async function handleSaveSessionReport() {
+    if (!pendingSessionReport || currentUser?.role !== "patient") {
+      setShowStopConfirmModal(false);
+      setPendingSessionReport(null);
+      return;
+    }
+
+    if (pendingSessionReport.stepCount <= 0) {
+      setStartError("Session has 0 steps, so it was not uploaded.");
+      setShowStopConfirmModal(false);
+      setPendingSessionReport(null);
+      return;
+    }
+
+    setIsSavingSessionReport(true);
+    try {
+      await recordProgress(pendingSessionReport);
+      setShowStopConfirmModal(false);
+      setPendingSessionReport(null);
+      setStartError(null);
+      showSuccessToast("Session report saved successfully.");
+    } catch {
+      setStartError("Failed to save session report. Please try again.");
+    } finally {
+      setIsSavingSessionReport(false);
+    }
+  }
+
+  async function handleRestartSessionFromModal() {
+    setShowStopConfirmModal(false);
+    setPendingSessionReport(null);
+    setStartError(null);
+    await handleStart();
   }
 
   return (
@@ -740,22 +917,6 @@ export function HomeScreen() {
         <Text className="mt-1 text-sm text-slate-300">Live rehab dashboard and progress recorder</Text>
         </View>
 
-        <View className="mx-5 mb-4 rounded-3xl bg-slate-900 p-5">
-          <View className="flex-row items-center justify-between">
-            <Text className="text-xs uppercase tracking-wide text-slate-300">Cadence Target Progress</Text>
-            <Text className="text-xs font-semibold text-white">{cadenceProgressPercent}%</Text>
-          </View>
-          <View className="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-700">
-            <View className="h-3 rounded-full bg-emerald-400" style={{ width: `${cadenceProgressPercent}%` }} />
-          </View>
-          <Text className="mt-2 text-xs text-slate-300">
-            Total average cadence: {overallCadenceSpm > 0 ? `${overallCadenceSpm.toFixed(1)} spm` : "-"} | Target: {cadenceTargetSpm} spm
-          </Text>
-          <Text className="mt-1 text-xs text-cyan-300">
-            Today: {todayCadenceSpm > 0 ? `${todayCadenceSpm.toFixed(1)} spm` : "-"} | {dailyCadenceStatus}
-          </Text>
-        </View>
-
         <View className="mx-5 rounded-3xl bg-slate-900 p-5">
         <View className="flex-row items-center justify-between">
           <Text className="text-sm uppercase tracking-widest text-slate-300">Session</Text>
@@ -764,8 +925,32 @@ export function HomeScreen() {
           </Text>
         </View>
 
-        <Text className="mt-4 text-6xl font-black text-white">{steps}</Text>
-        <Text className="text-sm text-slate-300">steps</Text>
+        <View className="mt-4 flex-row items-start gap-3">
+          <View className="flex-1">
+            <Text className="text-6xl font-black text-white">{steps}</Text>
+            <Text className="text-sm text-slate-300">steps</Text>
+          </View>
+          <View className="w-[80%] flex-col gap-2">
+            <View className="flex-1">
+              <MiniChart
+                label="Cadence (spm)"
+                values={cadenceSeries}
+                colorClassName="bg-cyan-400"
+                fixedMaxValue={150}
+                yAxisRangeLabel="0-150"
+              />
+            </View>
+            <View className="flex-1">
+              <MiniChart
+                label="Intensity (%)"
+                values={intensitySeries}
+                colorClassName="bg-fuchsia-400"
+                fixedMaxValue={100}
+                yAxisRangeLabel="0-100%"
+              />
+            </View>
+          </View>
+        </View>
 
         <View className="mt-5">
           <View className="mb-2 flex-row items-center justify-between">
@@ -783,10 +968,76 @@ export function HomeScreen() {
             <Text className="text-xs uppercase text-slate-400">Timer</Text>
             <Text className="text-2xl font-bold text-white">{formatDuration(elapsedMs)}</Text>
           </View>
-          <Text className={`rounded-full px-3 py-2 text-xs font-semibold ${getActivityPillClass(activityLabel)}`}>
-            {activityLabel.toUpperCase()}
-          </Text>
+          <View className="items-end">
+            {sessionTimeRemainingMs !== null ? (
+              <View className="items-end">
+                <Text className="text-[10px] uppercase text-slate-400">Time left</Text>
+                <Text className={`text-lg font-bold ${sessionTimeRemainingMs < 60000 ? "text-rose-400" : "text-emerald-300"}`}>
+                  {formatDuration(sessionTimeRemainingMs)}
+                </Text>
+              </View>
+            ) : null}
+            <Text className={`rounded-full px-3 py-2 text-xs font-semibold ${getActivityPillClass(activityLabel)}`}>
+              {activityLabel.toUpperCase()}
+            </Text>
+          </View>
         </View>
+        </View>
+
+        {scheduleGate && !isRunning ? (
+          <View className="mx-5 mt-4 rounded-2xl border border-amber-700 bg-amber-950 px-4 py-3">
+            <Text className="text-xs font-semibold uppercase tracking-wide text-amber-400">Session Blocked</Text>
+            <Text className="mt-1 text-sm text-amber-200">{scheduleGate}</Text>
+          </View>
+        ) : null}
+        {!scheduleGate && currentUser?.role === "patient" && patientSchedules[currentUser.id] && !isRunning ? (
+          <View className="mx-5 mt-4 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3">
+            {(() => {
+              const s = patientSchedules[currentUser.id];
+              const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+              const now = new Date();
+              const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+              const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+              const doneToday = progressEntries.filter((e) => {
+                if (e.patientId !== currentUser.id) return false;
+                const t = new Date(e.recordedAt).getTime();
+                return t >= dayStart && t < dayEnd;
+              }).length;
+              return (
+                <>
+                  <Text className="text-xs font-semibold uppercase tracking-wide text-slate-400">Today's Schedule</Text>
+                  <Text className="mt-1 text-sm text-slate-200">
+                    {s.sessionDurationMinutes} min session · {doneToday}/{s.sessionsPerDay} done · {s.cooloffMinutes} min cooloff
+                  </Text>
+                  <Text className="mt-1 text-xs text-slate-400">
+                    Active days: {s.activeDays.map((d) => dayNames[d]).join(", ")}
+                  </Text>
+                </>
+              );
+            })()}
+          </View>
+        ) : null}
+
+        <View className="mt-4 flex-row gap-3 px-5">
+        <Pressable
+          onPressIn={() => logClick("start_session_button")}
+          onPress={handleStart}
+          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning || !allPermissionsGranted || isCalibrating || isStartBlocked ? "bg-slate-600" : "bg-cyan-500"}`}
+          disabled={isRunning || !allPermissionsGranted || isCalibrating || isStartBlocked}
+        >
+          <Text className="text-center text-base font-semibold text-slate-950">
+            Start Session
+          </Text>
+        </Pressable>
+
+        <Pressable
+          onPressIn={() => logClick("stop_session_button")}
+          onPress={handleStop}
+          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning && allPermissionsGranted ? "bg-rose-500" : "bg-slate-600"}`}
+          disabled={!isRunning || !allPermissionsGranted}
+        >
+          <Text className="text-center text-base font-semibold text-white">Stop Session</Text>
+        </Pressable>
         </View>
 
         <View className="mt-4 flex-row flex-wrap justify-between gap-y-3 px-5">
@@ -818,24 +1069,6 @@ export function HomeScreen() {
         />
         </View>
 
-        <View className="mt-4 gap-3 px-5">
-        <Text className="text-sm font-semibold text-slate-200">Last 30s Trend</Text>
-        <MiniChart
-          label="Cadence (spm)"
-          values={cadenceSeries}
-          colorClassName="bg-cyan-400"
-          fixedMaxValue={150}
-          yAxisRangeLabel="0-150"
-        />
-        <MiniChart
-          label="Intensity (%)"
-          values={intensitySeries}
-          colorClassName="bg-fuchsia-400"
-          fixedMaxValue={100}
-          yAxisRangeLabel="0-100%"
-        />
-        </View>
-
         <View className="mt-4 px-5">
         <Text className="text-sm text-slate-300">Session ID: {sessionId ?? "-"}</Text>
         {motionCalibration ? (
@@ -851,27 +1084,6 @@ export function HomeScreen() {
         ) : null}
         </View>
 
-        <View className="mt-auto flex-row gap-3 px-5 pb-8 pt-6">
-        <Pressable
-          onPressIn={() => logClick("start_session_button")}
-          onPress={handleStart}
-          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning || !allPermissionsGranted || isCalibrating ? "bg-slate-600" : "bg-cyan-500"}`}
-          disabled={isRunning || !allPermissionsGranted || isCalibrating}
-        >
-          <Text className="text-center text-base font-semibold text-slate-950">
-            Start Session
-          </Text>
-        </Pressable>
-
-        <Pressable
-          onPressIn={() => logClick("stop_session_button")}
-          onPress={handleStop}
-          className={`flex-1 rounded-2xl px-4 py-4 ${isRunning && allPermissionsGranted ? "bg-rose-500" : "bg-slate-600"}`}
-          disabled={!isRunning || !allPermissionsGranted}
-        >
-          <Text className="text-center text-base font-semibold text-white">Stop Session</Text>
-        </Pressable>
-        </View>
       </ScrollView>
 
       <Modal
@@ -956,6 +1168,136 @@ export function HomeScreen() {
             >
               <Text className="text-center text-sm font-semibold text-white">Cancel Calibration</Text>
             </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showStopConfirmModal}
+        transparent
+        animationType="fade"
+      >
+        <View className="flex-1 items-center justify-center bg-black/70 px-6">
+          <View className="w-full rounded-3xl bg-slate-900 p-5">
+            <Text className="text-xl font-black text-white">Confirm Session Report</Text>
+            <Text className="mt-2 text-sm text-slate-300">
+              Review the session before uploading it to the database.
+            </Text>
+
+            <View className="mt-4 rounded-2xl bg-slate-800 p-4">
+              <Text className="text-xs uppercase tracking-wide text-slate-400">Session Summary</Text>
+              <Text className="mt-2 text-sm text-slate-100">Steps: {pendingSessionReport?.stepCount ?? 0}</Text>
+              <Text className="mt-1 text-sm text-slate-100">Duration: {formatDuration((pendingSessionReport?.durationSeconds ?? 0) * 1000)}</Text>
+              <Text className="mt-1 text-sm text-slate-100">Cadence: {(pendingSessionReport?.cadenceSpm ?? 0).toFixed(1)} spm</Text>
+              <Text className="mt-1 text-sm text-slate-100">Intensity: {Math.round((pendingSessionReport?.intensity ?? 0) * 100)}%</Text>
+              <Text className="mt-1 text-sm text-slate-100">Distance: {(pendingSessionReport?.distanceM ?? 0).toFixed(1)} m</Text>
+              <Text className="mt-1 text-sm text-slate-100">Activity: {(pendingSessionReport?.activityState ?? "idle").toUpperCase()}</Text>
+            </View>
+
+            {(pendingSessionReport?.stepCount ?? 0) <= 0 ? (
+              <Text className="mt-3 text-sm text-amber-300">
+                This session has 0 steps and will not be uploaded.
+              </Text>
+            ) : null}
+
+            <View className="mt-5 gap-3">
+              <Pressable
+                onPress={() => {
+                  void handleRestartSessionFromModal();
+                }}
+                className="rounded-2xl bg-cyan-500 px-4 py-3"
+                disabled={isSavingSessionReport}
+              >
+                <Text className="text-center text-sm font-semibold text-slate-950">Restart Session</Text>
+              </Pressable>
+
+              <View className="flex-row gap-3">
+                <Pressable
+                  onPress={handleCancelSessionSave}
+                  className="flex-1 rounded-2xl bg-slate-700 px-4 py-3"
+                  disabled={isSavingSessionReport}
+                >
+                  <Text className="text-center text-sm font-semibold text-white">Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    // If session ended before the doctor-assigned duration, warn first
+                    if (
+                      scheduledDurationMs !== null &&
+                      (pendingSessionReport?.durationSeconds ?? 0) * 1000 < scheduledDurationMs
+                    ) {
+                      setShowEarlyStopWarningModal(true);
+                      return;
+                    }
+                    void handleSaveSessionReport();
+                  }}
+                  className={`flex-1 rounded-2xl px-4 py-3 ${
+                    (pendingSessionReport?.stepCount ?? 0) <= 0 || isSavingSessionReport
+                      ? "bg-slate-600"
+                      : "bg-emerald-500"
+                  }`}
+                  disabled={(pendingSessionReport?.stepCount ?? 0) <= 0 || isSavingSessionReport}
+                >
+                  <Text className="text-center text-sm font-semibold text-white">
+                    {isSavingSessionReport ? "Saving..." : "Save"}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Early-stop warning modal */}
+      <Modal
+        visible={showEarlyStopWarningModal}
+        transparent
+        animationType="fade"
+      >
+        <View className="flex-1 items-center justify-center bg-black/70 px-6">
+          <View className="w-full rounded-3xl bg-slate-900 p-5">
+            <Text className="text-xl font-black text-amber-400">Session Incomplete</Text>
+            <Text className="mt-2 text-sm text-slate-300">
+              Your doctor prescribed a{" "}
+              <Text className="font-semibold text-white">
+                {scheduledDurationMs !== null ? Math.round(scheduledDurationMs / 60000) : 0} min
+              </Text>{" "}
+              session, but you only completed{" "}
+              <Text className="font-semibold text-white">
+                {formatDuration((pendingSessionReport?.durationSeconds ?? 0) * 1000)}
+              </Text>
+              . Saving an incomplete session may affect your recovery tracking.
+            </Text>
+
+            <View className="mt-4 rounded-2xl border border-amber-700 bg-amber-950 px-4 py-3">
+              <Text className="text-xs font-semibold uppercase tracking-wide text-amber-400">Prescribed</Text>
+              <Text className="mt-1 text-sm text-amber-200">
+                {scheduledDurationMs !== null ? Math.round(scheduledDurationMs / 60000) : 0} min required ·{" "}
+                {formatDuration((pendingSessionReport?.durationSeconds ?? 0) * 1000)} completed
+              </Text>
+            </View>
+
+            <View className="mt-5 flex-row gap-3">
+              <Pressable
+                onPress={() => setShowEarlyStopWarningModal(false)}
+                className="flex-1 rounded-2xl bg-slate-700 px-4 py-3"
+                disabled={isSavingSessionReport}
+              >
+                <Text className="text-center text-sm font-semibold text-white">Go Back</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setShowEarlyStopWarningModal(false);
+                  void handleSaveSessionReport();
+                }}
+                className={`flex-1 rounded-2xl px-4 py-3 ${isSavingSessionReport ? "bg-slate-600" : "bg-amber-600"}`}
+                disabled={isSavingSessionReport}
+              >
+                <Text className="text-center text-sm font-semibold text-white">
+                  {isSavingSessionReport ? "Saving..." : "Save Anyway"}
+                </Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>

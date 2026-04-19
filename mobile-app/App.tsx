@@ -11,9 +11,9 @@ import { HomeScreen } from "./src/screens/HomeScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { MainHomeScreen } from "./src/screens/MainHomeScreen";
 import { PatientProgressScreen } from "./src/screens/PatientProgressScreen";
+import { ProfileScreen } from "./src/screens/ProfileScreen";
 import { supabase } from "./src/services/supabase/client";
 import { useAppStore } from "./src/store/useAppStore";
-import { useSessionStore } from "./src/store/useSessionStore";
 import type { AppRoute } from "./src/types";
 
 function AuthenticatedApp() {
@@ -22,8 +22,6 @@ function AuthenticatedApp() {
   const selectedDoctorPatientId = useAppStore((state) => state.selectedDoctorPatientId);
   const navigate = useAppStore((state) => state.navigate);
   const setSelectedDoctorPatientId = useAppStore((state) => state.setSelectedDoctorPatientId);
-  const logout = useAppStore((state) => state.logout);
-  const resetSession = useSessionStore((state) => state.resetSession);
 
   useEffect(() => {
     if (Platform.OS !== "android") {
@@ -50,7 +48,7 @@ function AuthenticatedApp() {
         return true;
       }
 
-      if (currentRoute === "dashboard" || currentRoute === "progress") {
+      if (currentRoute === "dashboard" || currentRoute === "progress" || currentRoute === "profile") {
         navigate("home");
         return true;
       }
@@ -80,7 +78,11 @@ function AuthenticatedApp() {
   let subtitle = `Signed in as ${currentUser.fullName}`;
   let screen = <MainHomeScreen currentUser={currentUser} onNavigate={navigate} />;
 
-  if (currentUser.role === "patient" && currentRoute === "dashboard") {
+  if (currentRoute === "profile") {
+    title = "Profile";
+    subtitle = "";
+    screen = <ProfileScreen onBack={() => navigate("home")} />;
+  } else if (currentUser.role === "patient" && currentRoute === "dashboard") {
     title = "Patient Dashboard";
     subtitle = "Record your live rehab and walking progress.";
     screen = <HomeScreen />;
@@ -94,7 +96,7 @@ function AuthenticatedApp() {
     screen = (
       <DoctorPatientsScreen
         currentUser={currentUser}
-        onOpenPatientDetails={(patientId) => {
+        onOpenPatientDetails={(patientId: string) => {
           setSelectedDoctorPatientId(patientId);
           navigate("patient-detail");
         }}
@@ -108,7 +110,6 @@ function AuthenticatedApp() {
         currentUser={currentUser}
         patientId={selectedDoctorPatientId}
         onBack={() => {
-          setSelectedDoctorPatientId(null);
           navigate("patients");
         }}
         onEditTargets={() => navigate("patient-targets")}
@@ -132,25 +133,22 @@ function AuthenticatedApp() {
     subtitle = "Navigate between your home, dashboard, and progress pages.";
   }
 
-  function handleLogout() {
-    resetSession();
-    void logout();
-  }
-
   return (
     <>
       <TopNavbar
         currentUser={currentUser}
         title={title}
         subtitle={subtitle}
-        onLogout={handleLogout}
+        onNavigateProfile={() => navigate("profile")}
       />
       {screen}
-      <BottomNavbar
-        items={navItems}
-        currentRoute={currentRoute === "patient-detail" || currentRoute === "patient-targets" ? "patients" : currentRoute}
-        onNavigate={navigate}
-      />
+      {currentRoute !== "profile" ? (
+        <BottomNavbar
+          items={navItems}
+          currentRoute={currentRoute === "patient-detail" || currentRoute === "patient-targets" ? "patients" : currentRoute}
+          onNavigate={navigate}
+        />
+      ) : null}
     </>
   );
 }

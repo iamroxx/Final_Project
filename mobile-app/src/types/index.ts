@@ -45,7 +45,7 @@ export type ProcessedMetrics = {
 
 export type UserRole = "doctor" | "patient";
 
-export type AppRoute = "home" | "dashboard" | "progress" | "patients" | "patient-detail" | "patient-targets";
+export type AppRoute = "home" | "dashboard" | "progress" | "patients" | "patient-detail" | "patient-targets" | "profile";
 
 export type AppUser = {
   id: string;
@@ -76,4 +76,19 @@ export type SessionMetricPoint = {
   recordedAt: string;
   cadenceSpm: number;
   intensity: number;
+};
+
+export type PatientSchedule = {
+  /** Duration of each session in minutes */
+  sessionDurationMinutes: number;
+  /** Max number of sessions per day */
+  sessionsPerDay: number;
+  /** Minimum rest time between sessions in the same day (minutes) */
+  cooloffMinutes: number;
+  /** Active weekdays: 0=Sun, 1=Mon, ..., 6=Sat */
+  activeDays: number[];
+  /** ISO date "YYYY-MM-DD" or null */
+  startDate: string | null;
+  /** ISO date "YYYY-MM-DD" or null */
+  endDate: string | null;
 };

@@ -1,12 +1,13 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AppRoute, AppUser, ProgressEntry, SessionMetricPoint, UserRole } from "../types";
+import type { AppRoute, AppUser, PatientSchedule, ProgressEntry, SessionMetricPoint, UserRole } from "../types";
 import { supabase } from "../services/supabase/client";
 
 const INITIAL_PROGRESS_ENTRIES: ProgressEntry[] = [];
 const INITIAL_GOALS: Record<string, number> = {};
 const INITIAL_CADENCE_TARGETS: Record<string, number> = {};
+const INITIAL_SCHEDULES: Record<string, PatientSchedule> = {};
 
 type LoginResult = {
   ok: boolean;
@@ -18,6 +19,7 @@ type SignupPayload = {
   email: string;
   password: string;
   role: UserRole;
+  patientCode?: string;
 };
 
 type ProgressPayload = Omit<ProgressEntry, "id" | "recordedAt"> & {
@@ -36,16 +38,20 @@ type AppState = {
   sessionMetricSeries: Record<string, SessionMetricPoint[]>;
   goalSteps: Record<string, number>;
   cadenceTargets: Record<string, number>;
+  patientSchedules: Record<string, PatientSchedule>;
   patientDirectory: Record<string, { id: string; fullName: string; email: string; patientCode?: string }>;
   initializeAuth: () => Promise<void>;
   refreshDashboardData: () => Promise<void>;
   login: (email: string, password: string) => Promise<LoginResult>;
   signup: (payload: SignupPayload) => Promise<LoginResult>;
   logout: () => Promise<void>;
+  generatePatientInvite: () => Promise<LoginResult & { patientCode?: string; expiresAt?: string }>;
   addPatientByShareLink: (value: string) => Promise<LoginResult>;
   setPatientDailyGoal: (patientId: string, dailyGoal: number) => Promise<LoginResult>;
   setPatientCadenceTarget: (patientId: string, cadenceTargetSpm: number) => Promise<LoginResult>;
   setPatientTargets: (patientId: string, dailyGoal: number, cadenceTargetSpm: number) => Promise<LoginResult>;
+  setPatientSchedule: (patientId: string, schedule: PatientSchedule) => Promise<LoginResult>;
+  updateProfile: (payload: { fullName?: string; email?: string; newPassword?: string }) => Promise<LoginResult>;
   navigate: (route: AppRoute) => void;
   setSelectedDoctorPatientId: (patientId: string | null) => void;
   recordProgress: (payload: ProgressPayload) => Promise<void>;
@@ -88,6 +94,12 @@ type GoalRow = {
   patient_id: string;
   daily_step_goal: number;
   target_cadence_spm: number | null;
+  session_duration_minutes: number | null;
+  sessions_per_day: number | null;
+  cooloff_minutes: number | null;
+  active_days: number[] | null;
+  schedule_start_date: string | null;
+  schedule_end_date: string | null;
 };
 
 type SessionMetricRow = {
@@ -184,6 +196,7 @@ export const useAppStore = create<AppState>()(
       sessionMetricSeries: {},
       goalSteps: INITIAL_GOALS,
       cadenceTargets: INITIAL_CADENCE_TARGETS,
+      patientSchedules: INITIAL_SCHEDULES,
       patientDirectory: {},
       initializeAuth: async () => {
         const { data, error } = await supabase.auth.getSession();
@@ -196,6 +209,7 @@ export const useAppStore = create<AppState>()(
             sessionMetricSeries: {},
             goalSteps: {},
             cadenceTargets: {},
+            patientSchedules: {},
             patientDirectory: {},
           });
           return;
@@ -241,7 +255,7 @@ export const useAppStore = create<AppState>()(
           : [user.id];
 
         if (visibleIds.length === 0) {
-          set({ progressEntries: [], sessionMetricSeries: {}, goalSteps: {}, cadenceTargets: {}, patientDirectory: {} });
+          set({ progressEntries: [], sessionMetricSeries: {}, goalSteps: {}, cadenceTargets: {}, patientSchedules: {}, patientDirectory: {} });
           return;
         }
 
@@ -262,17 +276,26 @@ export const useAppStore = create<AppState>()(
 
         const { data: goalRows } = await supabase
           .from("patient_goals")
-          .select("patient_id, daily_step_goal, target_cadence_spm")
+          .select("patient_id, daily_step_goal, target_cadence_spm, session_duration_minutes, sessions_per_day, cooloff_minutes, active_days, schedule_start_date, schedule_end_date")
           .in("patient_id", visibleIds)
           .returns<GoalRow[]>();
 
         const nextGoals: Record<string, number> = {};
         const nextCadenceTargets: Record<string, number> = {};
+        const nextSchedules: Record<string, PatientSchedule> = {};
         (goalRows ?? []).forEach((row) => {
           nextGoals[row.patient_id] = row.daily_step_goal;
           if (row.target_cadence_spm) {
             nextCadenceTargets[row.patient_id] = row.target_cadence_spm;
           }
+          nextSchedules[row.patient_id] = {
+            sessionDurationMinutes: row.session_duration_minutes ?? 30,
+            sessionsPerDay: row.sessions_per_day ?? 1,
+            cooloffMinutes: row.cooloff_minutes ?? 60,
+            activeDays: row.active_days ?? [1, 2, 3, 4, 5],
+            startDate: row.schedule_start_date ?? null,
+            endDate: row.schedule_end_date ?? null,
+          };
         });
 
         const { data: progressRows } = await supabase
@@ -308,6 +331,7 @@ export const useAppStore = create<AppState>()(
           patientDirectory: nextDirectory,
           goalSteps: nextGoals,
           cadenceTargets: nextCadenceTargets,
+          patientSchedules: nextSchedules,
           progressEntries: (progressRows ?? []).map(mapProgressRow),
           sessionMetricSeries: nextSeries,
         });
@@ -338,9 +362,10 @@ export const useAppStore = create<AppState>()(
         await get().refreshDashboardData();
         return { ok: true };
       },
-      signup: async ({ fullName, email, password, role }) => {
+      signup: async ({ fullName, email, password, role, patientCode }) => {
         const normalizedEmail = email.trim().toLowerCase();
         const cleanName = fullName.trim();
+        const normalizedPatientCode = patientCode?.trim().toUpperCase();
 
         if (!cleanName) {
           return { ok: false, error: "Full name is required." };
@@ -351,6 +376,31 @@ export const useAppStore = create<AppState>()(
         if (password.trim().length < 6) {
           return { ok: false, error: "Password must be at least 6 characters." };
         }
+        if (role === "patient") {
+          if (!normalizedPatientCode) {
+            return { ok: false, error: "Patient ID is required. Ask your doctor to generate one." };
+          }
+          if (!/^PAT\d{5,}$/.test(normalizedPatientCode)) {
+            return { ok: false, error: "Enter a valid Patient ID (example: PAT00003)." };
+          }
+
+          const { data: isValidInvite, error: inviteCheckError } = await supabase
+            .rpc("validate_patient_invite", { input_code: normalizedPatientCode });
+
+          if (inviteCheckError) {
+            return {
+              ok: false,
+              error: "Unable to validate Patient ID right now. Please try again.",
+            };
+          }
+
+          if (!isValidInvite) {
+            return {
+              ok: false,
+              error: "Invalid or expired Patient ID. Please ask your doctor for a new Patient ID.",
+            };
+          }
+        }
 
         const { data, error } = await supabase.auth.signUp({
           email: normalizedEmail,
@@ -359,6 +409,7 @@ export const useAppStore = create<AppState>()(
             data: {
               full_name: cleanName,
               role,
+              patient_code: role === "patient" ? normalizedPatientCode : undefined,
             },
           },
         });
@@ -397,6 +448,62 @@ export const useAppStore = create<AppState>()(
 
         return { ok: true };
       },
+      generatePatientInvite: async () => {
+        const user = get().currentUser;
+        if (!user || user.role !== "doctor") {
+          return { ok: false, error: "Only doctors can generate patient IDs." };
+        }
+
+        const { data, error } = await supabase
+          .rpc("generate_patient_invite")
+          .single<{ patient_code: string; expires_at: string }>();
+
+        if (error || !data) {
+          return { ok: false, error: error?.message ?? "Failed to generate patient ID." };
+        }
+
+        return {
+          ok: true,
+          patientCode: data.patient_code,
+          expiresAt: data.expires_at,
+        };
+      },
+      updateProfile: async ({ fullName, email, newPassword }) => {
+        const user = get().currentUser;
+        if (!user) return { ok: false, error: "Not logged in." };
+
+        // Update auth email / password via Supabase auth
+        const authUpdates: { email?: string; password?: string } = {};
+        if (email && email !== user.email) authUpdates.email = email;
+        if (newPassword) authUpdates.password = newPassword;
+
+        if (Object.keys(authUpdates).length > 0) {
+          const { error: authError } = await supabase.auth.updateUser(authUpdates);
+          if (authError) return { ok: false, error: authError.message };
+        }
+
+        // Update display name in profiles table
+        if (fullName && fullName !== user.fullName) {
+          const { error: profileError } = await supabase
+            .from("profiles")
+            .update({ full_name: fullName })
+            .eq("id", user.id);
+          if (profileError) return { ok: false, error: profileError.message };
+        }
+
+        // Update local state
+        set((state) => ({
+          currentUser: state.currentUser
+            ? {
+                ...state.currentUser,
+                fullName: fullName ?? state.currentUser.fullName,
+                email: email ?? state.currentUser.email,
+              }
+            : null,
+        }));
+
+        return { ok: true };
+      },
       logout: async () => {
         await supabase.auth.signOut();
         set({
@@ -408,64 +515,16 @@ export const useAppStore = create<AppState>()(
           sessionMetricSeries: {},
           goalSteps: {},
           cadenceTargets: {},
+          patientSchedules: {},
           patientDirectory: {},
         });
       },
       addPatientByShareLink: async (value) => {
-        const user = get().currentUser;
-        if (!user || user.role !== "doctor") {
-          return { ok: false, error: "Only doctors can add patient profiles." };
-        }
-
-        const parsed = extractPatientIdentifier(value);
-        if (!parsed) {
-          return { ok: false, error: "Paste a valid patient ID or share link." };
-        }
-
-        let resolvedPatientId = parsed.patientId;
-        let profileQuery = supabase
-          .from("profiles")
-          .select("id, role, patient_code");
-
-        if (resolvedPatientId) {
-          profileQuery = profileQuery.eq("id", resolvedPatientId);
-        } else if (parsed.patientCode) {
-          profileQuery = profileQuery.eq("patient_code", parsed.patientCode);
-        }
-
-        const { data: patientProfile, error: lookupError } = await profileQuery.single<PatientLookupRow>();
-
-        if (lookupError || !patientProfile) {
-          return { ok: false, error: "Patient not found. Check the patient code and try again." };
-        }
-
-        if (patientProfile.role !== "patient") {
-          return { ok: false, error: "Only patient profiles can be assigned." };
-        }
-
-        resolvedPatientId = patientProfile.id;
-
-        if (resolvedPatientId === user.id) {
-          return { ok: false, error: "You cannot add your own profile as a patient." };
-        }
-
-        const { error } = await supabase
-          .from("doctor_patient_assignments")
-          .upsert(
-            {
-              doctor_id: user.id,
-              patient_id: resolvedPatientId,
-              status: "active",
-            },
-            { onConflict: "doctor_id,patient_id" }
-          );
-
-        if (error) {
-          return { ok: false, error: error.message };
-        }
-
-        await get().refreshDashboardData();
-        return { ok: true };
+        void value;
+        return {
+          ok: false,
+          error: "Direct patient linking is disabled. Generate a Patient ID and ask the patient to register with it.",
+        };
       },
       setPatientDailyGoal: async (patientId, dailyGoal) => {
         const user = get().currentUser;
@@ -581,6 +640,37 @@ export const useAppStore = create<AppState>()(
         }));
 
         await get().refreshDashboardData();
+        return { ok: true };
+      },
+      setPatientSchedule: async (patientId, schedule) => {
+        const user = get().currentUser;
+        if (!user || user.role !== "doctor") {
+          return { ok: false, error: "Only doctors can set patient schedules." };
+        }
+
+        const { error } = await supabase
+          .from("patient_goals")
+          .upsert(
+            {
+              patient_id: patientId,
+              session_duration_minutes: schedule.sessionDurationMinutes,
+              sessions_per_day: schedule.sessionsPerDay,
+              cooloff_minutes: schedule.cooloffMinutes,
+              active_days: schedule.activeDays,
+              schedule_start_date: schedule.startDate ?? null,
+              schedule_end_date: schedule.endDate ?? null,
+            },
+            { onConflict: "patient_id" }
+          );
+
+        if (error) {
+          return { ok: false, error: error.message };
+        }
+
+        set((state) => ({
+          patientSchedules: { ...state.patientSchedules, [patientId]: schedule },
+        }));
+
         return { ok: true };
       },
       navigate: (route) => {
