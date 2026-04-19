@@ -1,9 +1,13 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 
-load_dotenv()
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+ROOT_ENV_FILE = BACKEND_ROOT / ".env"
+
+load_dotenv(ROOT_ENV_FILE)
 
 
 class Config:

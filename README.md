@@ -24,8 +24,8 @@ Final_Projct/
 npm install
 ```
 
-3. Copy `.env.example` to `.env` and fill values.
-4. Start the app:
+1. Copy `.env.example` to `.env` and fill values.
+2. Start the app:
 
 ```bash
 npm run start
@@ -41,11 +41,23 @@ npm run start
 pip install -r requirements.txt
 ```
 
-4. Copy `.env.example` to `.env` and fill values.
-5. Run the server:
+1. Copy `.env.example` to `.env` and fill values.
+2. Run the server:
 
 ```bash
 python run.py
+```
+
+1. Optional: verify Firebase connectivity:
+
+```bash
+python check_firebase_connection.py
+```
+
+Continuous check every 10 seconds:
+
+```bash
+python check_firebase_connection.py --watch --interval 10
 ```
 
 Default API endpoint: `http://localhost:5000`
