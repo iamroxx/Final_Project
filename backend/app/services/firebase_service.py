@@ -1,45 +1,17 @@
 from __future__ import annotations
 
 import logging
-import os
-from threading import Lock
 from typing import Any, Dict
 
-import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_connection import get_firestore_client
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-_db = None
-_init_lock = Lock()
-
-
-def _init_firestore():
-    global _db
-    if _db is not None:
-        return _db
-
-    with _init_lock:
-        if _db is not None:
-            return _db
-
-        cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "").strip()
-        if not cred_path or not os.path.exists(cred_path):
-            return None
-
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
-
-        _db = firestore.client()
-        return _db
-
-
 def write_live_metrics(session_id: str, metrics: Dict[str, Any]) -> None:
-    db = _init_firestore()
+    db = get_firestore_client()
     if db is None:
         logger.warning("[firebase-write][skipped] Firestore is not configured")
         return
@@ -73,7 +45,7 @@ def write_live_metrics(session_id: str, metrics: Dict[str, Any]) -> None:
 
 
 def write_session_started(session_id: str, user_id: str, started_at: int) -> None:
-    db = _init_firestore()
+    db = get_firestore_client()
     if db is None:
         logger.warning("[firebase-write][skipped] Firestore is not configured")
         return
@@ -94,7 +66,7 @@ def write_session_started(session_id: str, user_id: str, started_at: int) -> Non
 
 
 def write_session_stopped(session_id: str, stopped_at: int) -> None:
-    db = _init_firestore()
+    db = get_firestore_client()
     if db is None:
         logger.warning("[firebase-write][skipped] Firestore is not configured")
         return
