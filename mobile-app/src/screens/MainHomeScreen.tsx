@@ -12,6 +12,8 @@ export function MainHomeScreen({ currentUser, onNavigate }: Props) {
   const progressEntries = useAppStore((state) => state.progressEntries);
   const goalSteps = useAppStore((state) => state.goalSteps);
   const patientDirectory = useAppStore((state) => state.patientDirectory);
+  const selectedDoctorPatientId = useAppStore((state) => state.selectedDoctorPatientId);
+  const setSelectedDoctorPatientId = useAppStore((state) => state.setSelectedDoctorPatientId);
 
   async function sharePatientProfile() {
     const patientIdentifier = currentUser.patientCode ?? currentUser.id;
@@ -34,6 +36,14 @@ export function MainHomeScreen({ currentUser, onNavigate }: Props) {
       id,
       fullName: patientDirectory[id]?.fullName ?? `Patient ${id.slice(0, 8)}`,
     }));
+    const orderedPatients = selectedDoctorPatientId
+      ? [
+          ...patients.filter((patient) => patient.id === selectedDoctorPatientId),
+          ...patients.filter((patient) => patient.id !== selectedDoctorPatientId),
+        ]
+      : patients;
+    const visiblePatients = orderedPatients.slice(0, 3);
+    const hasMorePatients = patients.length > visiblePatients.length;
     const totalTodaySteps = progressEntries
       .filter((entry) => patientIds.includes(entry.patientId))
       .reduce((total, entry) => total + entry.stepCount, 0);
@@ -60,11 +70,21 @@ export function MainHomeScreen({ currentUser, onNavigate }: Props) {
 
         <View className="rounded-3xl bg-slate-900 p-5">
           <Text className="text-sm font-semibold text-white">Assigned list</Text>
-          {patients.map((patient) => {
+          {selectedDoctorPatientId && visiblePatients[0]?.id === selectedDoctorPatientId ? (
+            <Text className="mt-1 text-xs text-cyan-300">Last viewed patient pinned on top</Text>
+          ) : null}
+          {visiblePatients.map((patient) => {
             const patientEntries = progressEntries.filter((entry) => entry.patientId === patient.id);
             const latestEntry = patientEntries[0];
             return (
-              <View key={patient.id} className="mt-4 rounded-2xl bg-slate-800 p-4">
+              <Pressable
+                key={patient.id}
+                onPress={() => {
+                  setSelectedDoctorPatientId(patient.id);
+                  onNavigate("patients");
+                }}
+                className={`mt-4 rounded-2xl p-4 ${patient.id === selectedDoctorPatientId ? "border border-cyan-700 bg-slate-800" : "bg-slate-800"}`}
+              >
                 <Text className="text-lg font-bold text-white">{patient.fullName}</Text>
                 <Text className="mt-1 text-sm text-slate-300">
                   Goal {goalSteps[patient.id] ?? 100} steps
@@ -74,9 +94,18 @@ export function MainHomeScreen({ currentUser, onNavigate }: Props) {
                     ? `Latest session: ${latestEntry.stepCount} steps, ${latestEntry.activityState}`
                     : "No sessions recorded yet."}
                 </Text>
-              </View>
+                <Text className="mt-3 text-xs font-semibold uppercase tracking-wide text-cyan-300">Open in patients</Text>
+              </Pressable>
             );
           })}
+          {hasMorePatients ? (
+            <Pressable
+              onPress={() => onNavigate("patients")}
+              className="mt-4 self-start rounded-full border border-slate-700 bg-slate-800 px-4 py-2"
+            >
+              <Text className="text-xs font-semibold uppercase tracking-wide text-slate-200">More</Text>
+            </Pressable>
+          ) : null}
         </View>
       </ScrollView>
     );

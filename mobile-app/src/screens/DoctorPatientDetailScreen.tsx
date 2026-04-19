@@ -11,6 +11,7 @@ type Props = {
 };
 
 const DEFAULT_CADENCE_TARGET_SPM = 70;
+const CADENCE_AVERAGE_WINDOW_DAYS = 7;
 
 type GraphSeries = {
   id: string;
@@ -251,32 +252,42 @@ export function DoctorPatientDetailScreen({ patientId, onBack, onEditTargets }: 
     return todaysEntries.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / todaysEntries.length;
   }, [patientId, progressEntries]);
 
-  const overallCadenceSpm = useMemo(() => {
+  const sevenDayAverageCadenceSpm = useMemo(() => {
     if (selectedPatientSessions.length === 0) {
       return 0;
     }
 
-    const weightedDuration = selectedPatientSessions.reduce((sum, entry) => sum + Math.max(entry.durationSeconds, 0), 0);
+    const windowStart = Date.now() - CADENCE_AVERAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const windowEntries = selectedPatientSessions.filter((entry) => {
+      const recordedAt = new Date(entry.recordedAt).getTime();
+      return Number.isFinite(recordedAt) && recordedAt >= windowStart;
+    });
+
+    if (windowEntries.length === 0) {
+      return 0;
+    }
+
+    const weightedDuration = windowEntries.reduce((sum, entry) => sum + Math.max(entry.durationSeconds, 0), 0);
     if (weightedDuration > 0) {
-      const weightedCadence = selectedPatientSessions.reduce(
+      const weightedCadence = windowEntries.reduce(
         (sum, entry) => sum + entry.cadenceSpm * Math.max(entry.durationSeconds, 0),
         0
       );
       return weightedCadence / weightedDuration;
     }
 
-    return selectedPatientSessions.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / selectedPatientSessions.length;
+    return windowEntries.reduce((sum, entry) => sum + entry.cadenceSpm, 0) / windowEntries.length;
   }, [selectedPatientSessions]);
 
   const cadenceTargetSpm = cadenceTargets[patientId] ?? DEFAULT_CADENCE_TARGET_SPM;
 
   const cadenceProgressPercent = useMemo(() => {
-    if (overallCadenceSpm <= 0 || cadenceTargetSpm <= 0) {
+    if (sevenDayAverageCadenceSpm <= 0 || cadenceTargetSpm <= 0) {
       return 0;
     }
 
-    return Math.max(0, Math.min(100, Math.round((overallCadenceSpm / cadenceTargetSpm) * 100)));
-  }, [cadenceTargetSpm, overallCadenceSpm]);
+    return Math.max(0, Math.min(100, Math.round((sevenDayAverageCadenceSpm / cadenceTargetSpm) * 100)));
+  }, [cadenceTargetSpm, sevenDayAverageCadenceSpm]);
 
   const dailyCadenceStatus = useMemo(() => {
     if (todayCadenceSpm <= 0) {
@@ -396,7 +407,7 @@ export function DoctorPatientDetailScreen({ patientId, onBack, onEditTargets }: 
             <View className="h-3 rounded-full bg-emerald-400" style={{ width: `${cadenceProgressPercent}%` }} />
           </View>
           <Text className="mt-2 text-xs text-slate-300">
-            Total average cadence: {overallCadenceSpm > 0 ? `${overallCadenceSpm.toFixed(1)} spm` : "-"} | Target: {cadenceTargetSpm} spm
+            7-day average cadence: {sevenDayAverageCadenceSpm > 0 ? `${sevenDayAverageCadenceSpm.toFixed(1)} spm` : "-"} | Target: {cadenceTargetSpm} spm
           </Text>
           <Text className="mt-1 text-xs text-cyan-300">
             Today: {todayCadenceSpm > 0 ? `${todayCadenceSpm.toFixed(1)} spm` : "-"} | {dailyCadenceStatus}
